@@ -225,3 +225,21 @@ async def async_fetch_url(session, url, method='GET', data=None, settings=None):
                 logger.error(f"Max retries reached for {url}: {e}")
                 return None
     return None
+
+def parse_athlete_name(name_raw):
+    """
+    Cleans up athlete name and returns {firstName, lastName}.
+    Handles \u00a0 and other whitespace issues.
+    Splits by first whitespace.
+    """
+    if not name_raw:
+        return {'firstName': '', 'lastName': ''}
+    
+    # Normalize unicode characters
+    clean = name_raw.replace('\u00a0', ' ').strip()
+    
+    parts = clean.split(' ', 1)
+    if len(parts) == 1:
+        return {'firstName': parts[0], 'lastName': ''}
+    else:
+        return {'firstName': parts[0], 'lastName': parts[1]}

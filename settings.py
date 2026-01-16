@@ -40,9 +40,8 @@ def load_settings_file(filepath='settings.txt'):
 def get_settings():
     settings = load_settings_file()
     
-    # Argparse Setup
     parser = argparse.ArgumentParser(description="Heavy Aggregator Scraper CLI")
-    parser.add_argument('--site', choices=['nasga', 'heavyathlete'], help="Site to scrape")
+    parser.add_argument('--site', choices=['nasga', 'heavyathlete', 'scottishscores', 'all'], help="Site to scrape")
     parser.add_argument('--proxy', help="Proxy URL")
     parser.add_argument('--user-agent', help="User Agent String")
     parser.add_argument('--retry-count', type=int, help="Number of retries")

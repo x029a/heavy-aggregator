@@ -21,12 +21,18 @@ def main():
         print("\nWhich site would you like to scrape?")
         print("1. Nasga (nasgaweb.com)")
         print("2. Heavy Athlete (heavyathlete.com)")
-        choice = input("Enter 1 or 2: ").strip()
+        print("3. Scottish Scores (scottishscores.com)")
+        print("4. All Sites")
+        choice = input("Enter 1-4: ").strip()
         
         if choice == '1':
             settings['site'] = 'nasga'
         elif choice == '2':
             settings['site'] = 'heavyathlete'
+        elif choice == '3':
+            settings['site'] = 'scottishscores'
+        elif choice == '4':
+            settings['site'] = 'all'
         else:
             print("Invalid choice. Exiting.")
             sys.exit(1)
@@ -75,6 +81,13 @@ def main():
             if val in ['json', 'csv']: settings['output_format'] = val
             else: print("Invalid format, keeping default.")
             
+        # Max Output Lines
+        default = settings.get('max_output_line_count', 0)
+        val = input(f"Split output after N lines (0 = no split) [{default}]: ").strip()
+        if val:
+            try: settings['max_output_line_count'] = int(val)
+            except ValueError: print("Invalid integer, keeping default.")
+            
         # Upload Prompt
         print("\n--- Remote Upload ---")
         print("Would you like to auto-upload results?")
@@ -95,23 +108,45 @@ def main():
     if settings.get('upload_provider'):
         logger.info(f"Upload Provider: {settings.get('upload_provider')}")
 
-    # 4. Run Scraper
-    if settings['site'] == 'nasga':
-        scraper = NasgaScraper(settings)
-    elif settings['site'] == 'heavyathlete':
-        scraper = HeavyAthleteScraper(settings)
+    # 4. Prepare Scrapers
+    scrapers = []
+    
+    # Imports
+    from scrapers.nasga import NasgaScraper
+    from scrapers.heavy_athlete import HeavyAthleteScraper
+    from scrapers.scottish_scores import ScottishScoresScraper
+
+    target = settings['site']
+    
+    if target == 'all':
+        scrapers.append(NasgaScraper(settings))
+        scrapers.append(HeavyAthleteScraper(settings))
+        scrapers.append(ScottishScoresScraper(settings))
+    elif target == 'nasga':
+        scrapers.append(NasgaScraper(settings))
+    elif target == 'heavyathlete':
+        scrapers.append(HeavyAthleteScraper(settings))
+    elif target == 'scottishscores':
+        scrapers.append(ScottishScoresScraper(settings))
     else:
-        logger.error(f"Unknown site: {settings['site']}")
+        logger.error(f"Unknown site: {target}")
         sys.exit(1)
         
     try:
         start_time = time.time()
         
+        # Async Runner Wrapper
+        async def run_scrapers_sequence():
+            for s in scrapers:
+                logger.info(f"--- Launching {s.__class__.__name__} ---")
+                await s.run()
+                logger.info(f"--- {s.__class__.__name__} Finished ---")
+
         # Async Execution
-        asyncio.run(scraper.run())
+        asyncio.run(run_scrapers_sequence())
         
         end_time = time.time()
-        logger.info(f"Done in {end_time - start_time:.2f} seconds.")
+        logger.info(f"All Tasks Done in {end_time - start_time:.2f} seconds.")
         
         # 5. Upload Results
         from uploaders import get_uploader
