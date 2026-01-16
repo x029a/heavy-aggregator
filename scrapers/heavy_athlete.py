@@ -2,7 +2,7 @@ import logging
 import time
 from datetime import datetime
 from bs4 import BeautifulSoup
-from utils import get_async_session, async_fetch_url, StreamingJSONWriter, ColoredFormatter
+from utils import get_async_session, async_fetch_url, StreamingJSONWriter, ColoredFormatter, parse_athlete_name
 from checkpoint import CheckpointManager
 import re
 import os
@@ -116,7 +116,7 @@ class HeavyAthleteScraper:
                     athlete_name = clean_cells[name_idx]
                     if not athlete_name: continue
                     
-                    athlete_data['Athlete'] = athlete_name
+                    athlete_data['Athlete'] = parse_athlete_name(athlete_name)
                     
                     for i, header in enumerate(event_headers):
                         if i == name_idx: continue

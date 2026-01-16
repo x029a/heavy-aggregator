@@ -3,7 +3,15 @@
 
 
 
-**Heavy Aggregator** is a configurable scraping tool designed to collect comprehensive data on Scottish Heavy Athletics. Ideally suited for archiving and analysis, it currently supports scraping `nasgaweb.com` (NASGA), and `Heavy Athlete`. It is built in a manner that additional scrapers can easily be added and inherit configuration.
+**Heavy Aggregator** is a configurable scraping tool designed to collect comprehensive data on Scottish Heavy Athletics. Ideally suited for archiving and analysis.
+
+The program currently supports automated (and automatable) scanning and scraping of:
+
+*   `nasgaweb.com` (NASGA)
+*   `Heavy Athlete`
+*   `Scottish Scores`
+
+It is built in a manner that additional scrapers can easily be added and inherit configuration. 
 
 ## Features
 
@@ -120,6 +128,8 @@ Scraped data is saved to the `output/` directory with timestamped filenames:
 *   `nasga_games_YYYY-MM-DD_HH-MM-SS(_part_X).json`
 *   `nasga_athletes_YYYY-MM-DD_HH-MM-SS(_part_X).json`
 *   `heavyathlete_games_YYYY-MM-DD_HH-MM-SS(_part_X).json`
+*   `scottishscores_games_YYYY-MM-DD_HH-MM-SS(_part_X).json`
+*   `scottishscores_athletes_YYYY-MM-DD_HH-MM-SS(_part_X).json`
 
 ## Disclaimer
 
