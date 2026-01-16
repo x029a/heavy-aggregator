@@ -21,18 +21,18 @@
 
 ## Performance & Reliability
 
-### 🚀 Async & Concurrency
+### Async & Concurrency
 The scraper now uses `asyncio` and `aiohttp` to fetch data in parallel, drastically reducing scrape time. 
 *   **Concurrency**: Controls how many simultaneous requests are made. Default is 5.
 *   **Throttle**: Adds a delay (in ms) *per worker*.
 
 Adjust concurrency via CLI (`--concurrency 10`) or `settings.txt`.
 
-### 💾 Checkpoint & Resume
+### Checkpoint & Resume
 The scraper automatically saves its progress to `checkpoint.json`. If you stop the script (Ctrl+C) or it crashes, run it again to resume exactly where you left off (Year/Month/Game).
 *   To reset progress, simply delete `checkpoint.json`.
 
-### 🐳 Docker Support
+### Docker Support
 Run without installing Python dependencies using Docker.
 1.  **Build**: `docker-compose build`
 2.  **Run**: `docker-compose run scraper`
