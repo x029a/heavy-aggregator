@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  scraper:
+    build: .
+    volumes:
+      - ./output:/app/output
+      - ./settings.txt:/app/settings.txt
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+    # Keep container open or run default command
+    # User can run: docker-compose run scraper --site nasga ...
