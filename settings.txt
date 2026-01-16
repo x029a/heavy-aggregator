@@ -5,3 +5,15 @@
 # retry_count=3
 # throttle=0
 # output_format=json
+
+# --- Remote Upload Configuration ---
+# upload_provider=S3  (Options: S3, WEBHOOK, NONE)
+
+# [S3 Settings]
+# s3_bucket=my-heavy-data-bucket
+# s3_region=us-east-1
+# s3_access_key=AKIA... (Optional, prefers Env Vars)
+# s3_secret_key=xyz...  (Optional, prefers Env Vars)
+
+# [Webhook Settings]
+# webhook_url=https://my-dashboard.com/api/ingest

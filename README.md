@@ -55,6 +55,10 @@ python main.py --site nasga --throttle 1000 --max-output-line-count 10000
 *   `--retry-count`: Number of retries for failed requests (default: 3).
 *   `--max-output-line-count`: Split output files after N lines (e.g., 10000). Useful for large datasets.
 *   `--output-format`: Output format (`json` or `csv`). *Note: CSV support is experimental.*
+*   `--upload`: Upload provider (`s3` or `webhook`).
+*   `--s3-bucket`: AWS S3 Bucket Name.
+*   `--s3-region`: AWS Region (e.g. `us-east-1`).
+*   `--webhook-url`: URL to POST output files to.
 
 ## Configuration
 
@@ -76,6 +80,12 @@ throttle=2000
 
 max_output_line_count=20000 
 (Is the number of lines to write to a file before creating a new file (the default is 0, which means that it will write all data to a single file))
+
+# --- Remote Upload ---
+# upload_provider=S3
+# s3_bucket=my-archive
+# s3_region=us-east-1
+# webhook_url=https://api.myapp.com/upload
 ```
 
 ## Output
