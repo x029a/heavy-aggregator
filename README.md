@@ -19,6 +19,27 @@
 *   **Resilient**: built-in retry logic, error handling, and ModSecurity evasion.
 *   **Timestamped Output**: Saves data to JSON files with execution timestamps.
 
+## Performance & Reliability
+
+### 🚀 Async & Concurrency
+The scraper now uses `asyncio` and `aiohttp` to fetch data in parallel, drastically reducing scrape time. 
+*   **Concurrency**: Controls how many simultaneous requests are made. Default is 5.
+*   **Throttle**: Adds a delay (in ms) *per worker*.
+
+Adjust concurrency via CLI (`--concurrency 10`) or `settings.txt`.
+
+### 💾 Checkpoint & Resume
+The scraper automatically saves its progress to `checkpoint.json`. If you stop the script (Ctrl+C) or it crashes, run it again to resume exactly where you left off (Year/Month/Game).
+*   To reset progress, simply delete `checkpoint.json`.
+
+### 🐳 Docker Support
+Run without installing Python dependencies using Docker.
+1.  **Build**: `docker-compose build`
+2.  **Run**: `docker-compose run scraper`
+    *   Example: `docker-compose run scraper --site nasga --concurrency 10`
+*   Output files are saved to the local `output/` directory.
+*   Edit `settings.txt` locally and it will be reflected in the container.
+
 ## Installation
 
 1.  **Clone the repository**:
@@ -53,7 +74,8 @@ python main.py --site nasga --throttle 1000 --max-output-line-count 10000
 *   `--user-agent`: Custom User-Agent string.
 *   `--throttle`: Delay between requests in milliseconds (default: 0).
 *   `--retry-count`: Number of retries for failed requests (default: 3).
-*   `--max-output-line-count`: Split output files after N lines (e.g., 10000). Useful for large datasets.
+*   `--concurrency`: Number of parallel requests (default: 5). Increase for speed, decrease for stability.
+*   `--throttle`: Delay in milliseconds between requests.
 *   `--output-format`: Output format (`json` or `csv`). *Note: CSV support is experimental.*
 *   `--upload`: Upload provider (`s3` or `webhook`).
 *   `--s3-bucket`: AWS S3 Bucket Name.
@@ -80,6 +102,9 @@ throttle=2000
 
 max_output_line_count=20000 
 (Is the number of lines to write to a file before creating a new file (the default is 0, which means that it will write all data to a single file))
+
+concurrency=5
+(Number of parallel requests. Higher is faster but may trigger blocking. Default is 5.)
 
 # --- Remote Upload ---
 # upload_provider=S3

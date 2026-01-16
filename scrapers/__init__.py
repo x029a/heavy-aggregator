@@ -6,7 +6,7 @@ class Scraper(ABC):
         self.data = []
 
     @abstractmethod
-    def run(self):
+    async def run(self):
         """Execute the scraping logic."""
         pass
         

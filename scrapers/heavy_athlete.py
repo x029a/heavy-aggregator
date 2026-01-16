@@ -2,9 +2,11 @@ import logging
 import time
 from datetime import datetime
 from bs4 import BeautifulSoup
-from utils import get_session, fetch_url, StreamingJSONWriter, ColoredFormatter
+from utils import get_async_session, async_fetch_url, StreamingJSONWriter, ColoredFormatter
+from checkpoint import CheckpointManager
 import re
 import os
+import asyncio
 
 logger = logging.getLogger("HeavyAggregator")
 
@@ -13,6 +15,7 @@ class HeavyAthleteScraper:
 
     def __init__(self, settings):
         self.settings = settings
+        self.checkpoint = CheckpointManager()
 
     def clean_text(self, text):
         if isinstance(text, str):
@@ -40,7 +43,6 @@ class HeavyAthleteScraper:
         if text.upper() in ['NT', 'DNS', '-', '', 'F']:
             return None
         
-        # Already checked NASGA logic, re-using robust regexes
         if ':' in text: return text # Time
         
         # 20'-4"
@@ -65,13 +67,12 @@ class HeavyAthleteScraper:
         return text
 
     def parse_scores_html(self, html_content):
+        if not html_content: return {}
         soup = BeautifulSoup(html_content, 'html.parser')
         structured_results = {}
         current_class = "Unknown"
         event_headers = []
         
-        # HeavyAthlete uses Bootstrap tables
-        # Look for the table
         table = soup.find('table')
         if not table:
             return {}
@@ -79,8 +80,6 @@ class HeavyAthleteScraper:
         rows = table.find_all('tr')
         
         for row in rows:
-            # Check for Class Header (single th usually)
-            # Example: <tr><th>Amateur A</th></tr>
             th_cells = row.find_all('th')
             td_cells = row.find_all('td')
             
@@ -91,10 +90,8 @@ class HeavyAthleteScraper:
             if not non_empty: continue
 
             # Class Header Identification
-            # If it's a single TH cell with text, likely a class name
             if len(th_cells) == 1 and not td_cells:
                 val = non_empty[0]
-                # Filter out "Historic Scores" or other meta headers if needed
                 if "Historic Scores" not in val and "NASGA Clone" not in val:
                     current_class = val
                     if current_class not in structured_results:
@@ -102,26 +99,18 @@ class HeavyAthleteScraper:
                 continue
 
             # Event Header Identification
-            # <th class="no-wrap">Athlete Name</th> ...
             if "Athlete Name" in clean_cells:
                 event_headers = clean_cells
                 continue
 
             # Data Row
-            # Must have data cells and we must have a current class
             if td_cells and current_class != "Unknown" and event_headers:
                 athlete_data = {}
                 
-                # Map headers to values by index
-                # clean_cells matches event_headers length ideally
-                # But sometimes colspan usage might mess it up? 
-                # HeavyAthlete tables seem regular.
-                
-                # Identify Athlete Name index
                 try:
                     name_idx = event_headers.index("Athlete Name")
                 except ValueError:
-                    continue # Skip if we can't find name column
+                    continue
 
                 if name_idx < len(clean_cells):
                     athlete_name = clean_cells[name_idx]
@@ -129,19 +118,16 @@ class HeavyAthleteScraper:
                     
                     athlete_data['Athlete'] = athlete_name
                     
-                    # Parse other columns
                     for i, header in enumerate(event_headers):
                         if i == name_idx: continue
                         if i < len(clean_cells):
                             val = clean_cells[i]
                             
-                            # Determine if Place, Points or Event
                             if header in ['Place', 'Rank']:
                                 athlete_data['Place'] = self.parse_number(val, 'int')
                             elif header in ['Pts', 'Points', 'Total']:
                                 athlete_data['GamesPoints'] = self.parse_number(val, 'float')
                             else:
-                                # Likely an Event
                                 parsed_val = self.parse_distance(val)
                                 if parsed_val is not None:
                                     athlete_data[header] = parsed_val
@@ -150,77 +136,110 @@ class HeavyAthleteScraper:
 
         return structured_results
 
-    def run(self):
-        logger.info("Starting Heavy Athlete Scraper...")
-        session = get_session(self.settings)
+    async def _fetch_month_games(self, session, year, month):
+        url = f"{self.BASE_URL}/game/calendar_list/{year}/{month}/"
+        resp_text = await async_fetch_url(session, url, settings=self.settings)
+        if not resp_text: return []
+        
+        # Find all game links
+        # Returns list of (gid, match_object) tuples
+        games = []
+        # Pattern for ID and optional Name
+        # <a href="/game/5630/">Central Florida Highland Games</a>
+        # We find just IDs first then grep name
+        
+        links = re.findall(r'href="/game/(\d+)/">([^<]+)</a>', resp_text)
+        for gid, name in links:
+             games.append({'id': gid, 'name': name.strip(), 'year': str(year), 'month': str(month)})
+             
+        # Also catch just IDs if name regex fails?
+        # links_simple = re.findall(r'href="/game/(\d+)/"', resp_text)
+        # But consistent naming is nice.
+        
+        if not links:
+             # Fallback: check for IDs without name capture (unlikely structure but safe)
+             ids = re.findall(r'href="/game/(\d+)/"', resp_text)
+             for gid in ids:
+                 # Check if we already have it
+                 if not any(g['id'] == gid for g in games):
+                     games.append({'id': gid, 'name': f"Game {gid}", 'year': str(year), 'month': str(month)})
+        
+        return games
 
+    async def _scrape_game(self, session, game_info, semaphore):
+        async with semaphore:
+            gid = game_info['id']
+            name = game_info['name']
+            logger.info(f"    Scraping Game: {name} ({gid})")
+            
+            scores_url = f"{self.BASE_URL}/game/{gid}/scores_htmx/"
+            resp_text = await async_fetch_url(session, scores_url, settings=self.settings)
+            
+            game_entry = {
+                'id': gid,
+                'name': name,
+                'year': game_info['year'],
+                'month': game_info['month'],
+                'source': 'heavyathlete.com',
+                'results': self.parse_scores_html(resp_text)
+            }
+            return game_entry
+
+    async def run(self):
+        logger.info("Starting Heavy Athlete Scraper (Async)...")
+        
+        # Checkpoint Resume
+        start_year = 1999
+        saved_year = self.checkpoint.get("heavyathlete_year")
+        if saved_year:
+            logger.info(f"Found checkpoint. Resuming from Year: {saved_year}")
+            start_year = int(saved_year)
+
+        current_year = datetime.now().year
+        years = range(start_year, current_year + 2)
+        
         # Output Setup
         date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         output_dir = 'output'
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            
+        if not os.path.exists(output_dir): os.makedirs(output_dir)
         max_lines = self.settings.get('max_output_line_count', 0)
         games_writer = StreamingJSONWriter(output_dir, f'heavyathlete_games_{date_str}.json', max_lines)
+
+        concurrency = self.settings.get('concurrency', 5)
+        semaphore = asyncio.Semaphore(concurrency)
         
-        # Date Range: 1999 to Current Year + 1 
-        current_year = datetime.now().year
-        start_year = 1999
-        years = range(start_year, current_year + 2) # +2 to include next year (scheduled games)
+        session = await get_async_session(self.settings)
         
         try:
             for year in years:
                 logger.info(f"Scanning Year: {year}")
-                for month in range(1, 13):
-                    # Discovery URL: /game/calendar_list/YYYY/M/
-                    calendar_url = f"{self.BASE_URL}/game/calendar_list/{year}/{month}/"
-                    resp = fetch_url(session, calendar_url, settings=self.settings)
-                    if not resp: continue
+                
+                # 1. Fetch all months in parallel to find games
+                month_tasks = [self._fetch_month_games(session, year, m) for m in range(1, 13)]
+                month_results = await asyncio.gather(*month_tasks)
+                
+                # Flatten list of games
+                year_games = [g for months in month_results for g in months]
+                
+                if year_games:
+                    logger.info(f"  Found {len(year_games)} games in {year}. Fetching details...")
                     
-                    # Regex to find game links: <a href="/game/1234/">
-                    # Pattern: href="/game/(\d+)/"
-                    game_ids = set(re.findall(r'href="/game/(\d+)/"', resp.text))
+                    # 2. Fetch game details in parallel
+                    game_tasks = [self._scrape_game(session, g, semaphore) for g in year_games]
+                    results = await asyncio.gather(*game_tasks)
                     
-                    if game_ids:
-                        logger.info(f"  Month {month}: Found {len(game_ids)} games.")
-                    
-                    for gid in game_ids:
-                        # Scrape Game details
-                        # We need Name and Metadata roughly. 
-                        # The calendar page has names, but messy to parse with regex only.
-                        # Let's hit the game page or scores page?
-                        # The Scores HTMX is best for data.
-                        # Metadata (Name, Date, Location) is in the main /game/{id}/ page.
-                        # For efficiency, we might just grab the name from the Calendar page if regex permits?
-                        # Regex for ID and Name: <a href="/game/5630/">Central Florida Highland Games</a>
-                        
-                        # Let's just create a basic entry and fill data from scores.
-                        # Ideally we want Game Name.
-                        # Try to find Name in calendar text:
-                        match_name = re.search(f'href="/game/{gid}/">([^<]+)</a>', resp.text)
-                        game_name = match_name.group(1).strip() if match_name else f"Game {gid}"
-                        
-                        logger.info(f"    Scraping Game: {game_name} ({gid})")
-                        
-                        # Fetch Scores (HTMX endpoint)
-                        scores_url = f"{self.BASE_URL}/game/{gid}/scores_htmx/"
-                        scores_resp = fetch_url(session, scores_url, settings=self.settings)
-                        
-                        structured_results = {}
-                        if scores_resp:
-                            structured_results = self.parse_scores_html(scores_resp.text)
-                        
-                        game_obj = {
-                            'id': gid,
-                            'name': game_name,
-                            'year': str(year),
-                            'month': str(month),
-                            'source': 'heavyathlete.com',
-                            'results': structured_results
-                        }
-                        
-                        games_writer.write_item(game_obj)
-
+                    for res in results:
+                        if res:
+                            games_writer.write_item(res)
+                
+                # Update Checkpoint
+                self.checkpoint.save("heavyathlete_year", year + 1)
+                
+        except Exception as e:
+            logger.exception(f"Error during scraping: {e}")
+            raise
         finally:
             games_writer.close()
+            await session.close()
             logger.info("Heavy Athlete Scraping Complete.")
+

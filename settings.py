@@ -6,6 +6,7 @@ DEFAULT_SETTINGS = {
     'user_agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'retry_count': 3,
     'throttle': 0,
+    'concurrency': 5,
     'output_format': 'json',
     'max_output_line_count': 0
 }
@@ -25,15 +26,14 @@ def load_settings_file(filepath='settings.txt'):
                 key = key.strip().lower()
                 value = value.strip()
 
-                if key in [
-                    'retry_count', 'throttle', 'max_output_line_count'
-                ]:
-                    try:
-                        settings[key] = int(value)
-                    except ValueError:
-                        pass # Keep default
-                else:
-                    settings[key] = value
+                if key in settings:
+                    if key in ['retry_count', 'throttle', 'max_output_line_count', 'concurrency']:
+                        try:
+                            settings[key] = int(value)
+                        except ValueError:
+                            pass # Keep default
+                    else:
+                        settings[key] = value
 
     return settings
 
@@ -45,8 +45,9 @@ def get_settings():
     parser.add_argument('--site', choices=['nasga', 'heavyathlete'], help="Site to scrape")
     parser.add_argument('--proxy', help="Proxy URL")
     parser.add_argument('--user-agent', help="User Agent String")
-    parser.add_argument('--throttle', type=int, help="Throttle delay in ms")
     parser.add_argument('--retry-count', type=int, help="Number of retries")
+    parser.add_argument('--throttle', type=int, help="Throttle delay in ms")
+    parser.add_argument('--concurrency', type=int, default=5, help="Number of concurrent requests (default: 5)")
     parser.add_argument('--output-format', choices=['json', 'csv'], help="Output format")
     parser.add_argument('--max-output-line-count', type=int, help="Split output file after N lines")
     
@@ -64,6 +65,7 @@ def get_settings():
     if args.user_agent: settings['user_agent'] = args.user_agent
     if args.throttle is not None: settings['throttle'] = args.throttle
     if args.retry_count is not None: settings['retry_count'] = args.retry_count
+    if args.concurrency is not None: settings['concurrency'] = args.concurrency
     if args.output_format: settings['output_format'] = args.output_format
     if args.max_output_line_count is not None: settings['max_output_line_count'] = args.max_output_line_count
     

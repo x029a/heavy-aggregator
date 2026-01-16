@@ -6,6 +6,9 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import json
 import os
+import aiohttp
+import asyncio
+from aiohttp import ClientTimeout
 
 class StreamingJSONWriter:
     def __init__(self, output_dir, base_name, max_lines=0):
@@ -168,3 +171,57 @@ def fetch_url(session, url, method='GET', data=None, settings=None):
     except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching {url}: {e}")
         return None
+
+async def get_async_session(settings):
+    headers = {
+        "User-Agent": settings.get('user_agent', 'HeavyAggregator/1.0'),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+        "Referer": "http://www.nasgaweb.com/",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
+    }
+
+    timeout = ClientTimeout(total=45)
+    return aiohttp.ClientSession(headers=headers, timeout=timeout)
+
+async def async_fetch_url(session, url, method='GET', data=None, settings=None):
+    throttle = settings.get('throttle', 0) if settings else 0
+    if throttle > 0:
+        await asyncio.sleep(throttle / 1000.0)
+
+    proxy = settings.get('proxy') if settings and settings.get('proxy') != 'NONE' else None
+    retries = settings.get('retry_count', 3) if settings else 3
+    
+    for attempt in range(retries + 1):
+        try:
+            async with session.request(method, url, data=data, proxy=proxy) as response:
+                if response.status in [429, 500, 502, 503, 504]:
+                    if attempt < retries:
+                        wait = (attempt + 1) * 2
+                        logger.warning(f"Got {response.status} for {url}. Retrying in {wait}s...")
+                        await asyncio.sleep(wait)
+                        continue
+                    else:
+                        response.raise_for_status()
+                
+                if response.status == 200:
+                    try:
+                        text = await response.text()
+                        return text
+                    except Exception as e:
+                         logger.error(f"Error reading text from {url}: {e}")
+                         return None
+                else:
+                    logger.warning(f"Failed {url} with status {response.status}")
+                    return None
+                    
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if attempt < retries:
+                logger.warning(f"Connection error for {url}: {e}. Retrying...")
+                await asyncio.sleep(2)
+            else:
+                logger.error(f"Max retries reached for {url}: {e}")
+                return None
+    return None
