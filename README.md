@@ -1,4 +1,6 @@
 # Heavy Aggregator
+<img width="1102" height="744" alt="image" src="https://github.com/user-attachments/assets/512ab356-d13f-4584-a05e-cf9cd15130fc" />
+
 
 **Heavy Aggregator** is a configurable scraping tool designed to collect comprehensive data on Scottish Heavy Athletics. Ideally suited for archiving and analysis, it currently supports scraping `nasgaweb.com` (NASGA), and `Heavy Athlete`. It is built in a manner that additional scrapers can easily be added and inherit configuration.
 
