@@ -79,8 +79,26 @@ def main():
                 settings['output_format'] = val
             else:
                 print("Invalid format, keeping default.")
+                
+        # Upload Prompt
+        print("\n--- Remote Upload ---")
+        print("Would you like to auto-upload results?")
+        print("1. No")
+        print("2. S3 Bucket")
+        print("3. Webhook URL")
+        up_choice = input("Enter choice [1]: ").strip()
+        
+        if up_choice == '2':
+            settings['upload_provider'] = 'S3'
+            settings['s3_bucket'] = input(f"S3 Bucket [{settings.get('s3_bucket') or ''}]: ").strip() or settings.get('s3_bucket')
+            settings['s3_region'] = input(f"S3 Region [{settings.get('s3_region') or 'us-east-1'}]: ").strip() or settings.get('s3_region')
+        elif up_choice == '3':
+            settings['upload_provider'] = 'WEBHOOK'
+            settings['webhook_url'] = input(f"Webhook URL [{settings.get('webhook_url') or ''}]: ").strip() or settings.get('webhook_url')
 
     logger.info(f"Configuration: Site={settings['site']}, Proxy={settings.get('proxy') or 'None'}, Throttle={settings.get('throttle')}")
+    if settings.get('upload_provider'):
+        logger.info(f"Upload Provider: {settings.get('upload_provider')}")
 
     # 4. Run Scraper
     if settings['site'] == 'nasga':
@@ -91,7 +109,40 @@ def main():
         logger.error(f"Unknown site: {settings['site']}")
         sys.exit(1)
         
-    scraper.run()
+    try:
+        # Track start time to find new files
+        import time
+        start_time = time.time()
+        
+        scraper.run()
+        
+        # 5. Upload Results
+        from uploaders import get_uploader
+        uploader = get_uploader(settings)
+        
+        if uploader:
+            import os
+            logger.info("Starting Remote Upload...")
+            # Find files in output/ modified after start_time
+            output_dir = 'output'
+            files_to_upload = []
+            if os.path.exists(output_dir):
+                for f in os.listdir(output_dir):
+                    fpath = os.path.join(output_dir, f)
+                    if os.path.isfile(fpath):
+                        if os.path.getmtime(fpath) > start_time:
+                            files_to_upload.append(fpath)
+            
+            if not files_to_upload:
+                logger.warning("No new files found to upload.")
+            else:
+                for fpath in files_to_upload:
+                    uploader.upload(fpath)
+                    
+    except KeyboardInterrupt:
+        logger.info("Scraping interrupted by user.")
+    except Exception as e:
+        logger.exception(f"Fatal error during scraping: {e}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
