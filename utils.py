@@ -186,6 +186,55 @@ async def get_async_session(settings):
     timeout = ClientTimeout(total=45)
     return aiohttp.ClientSession(headers=headers, timeout=timeout)
 
+class FailedItemWriter:
+    def __init__(self, output_dir, base_name):
+        self.filename = os.path.join(output_dir, base_name)
+        # Ensure dir exists
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            
+        # Initialize list if file doesn't exist
+        if not os.path.exists(self.filename):
+            with open(self.filename, 'w') as f:
+                json.dump([], f)
+                
+    def log_failure(self, url, item_id, reason):
+        entry = {
+            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+            'url': url,
+            'id': item_id,
+            'reason': str(reason)
+        }
+        
+        # Read, Append, Write (Inefficient for massive scale but safe for robust logging)
+        # For concurrent access, we might need a lock if multiple processes used, but 
+        # asyncio is single-threaded event loop, so file I/O blocking is the main concern.
+        # Ideally, we append to a list in memory and dump periodically, or append to file?
+        # JSON standard doesn't support append easily. 
+        # Making this Append-Only JSON Lines (JSONL) is better for logging.
+        # User requested ".json", but ".jsonl" is safer for crashes.
+        # Let's stick to appending to a list is risky if crash.
+        # Let's use JSONL logic but call it .json if user insists, or proper JSONL.
+        # Actually user said "save that info ... to a 'nasga_failed_retrievals.json'"
+        # Let's do simple read/write for now, assuming low failure rate.
+        
+        try:
+            current = []
+            if os.path.exists(self.filename) and os.path.getsize(self.filename) > 0:
+                with open(self.filename, 'r') as f:
+                    try:
+                        current = json.load(f)
+                    except json.JSONDecodeError:
+                        current = []
+            
+            current.append(entry)
+            
+            with open(self.filename, 'w') as f:
+                json.dump(current, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to log failure for {url}: {e}")
+
+
 async def async_fetch_url(session, url, method='GET', data=None, settings=None):
     throttle = settings.get('throttle', 0) if settings else 0
     if throttle > 0:
@@ -198,6 +247,16 @@ async def async_fetch_url(session, url, method='GET', data=None, settings=None):
         try:
             async with session.request(method, url, data=data, proxy=proxy) as response:
                 if response.status in [429, 500, 502, 503, 504]:
+                    # Check for unrecoverable errors in 500 response
+                    if response.status == 500:
+                        try:
+                            text = await response.text()
+                            if "Microsoft JET Database Engine error" in text or "Syntax error in date" in text:
+                                logger.error(f"Unrecoverable Database Error for {url}. Skipping retry.")
+                                return None # Do not raise, return None to signal missing data
+                        except Exception:
+                            pass # Failed to read text, proceed with normal retry logic
+
                     if attempt < retries:
                         wait = (attempt + 1) * 2
                         logger.warning(f"Got {response.status} for {url}. Retrying in {wait}s...")

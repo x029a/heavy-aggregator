@@ -131,13 +131,31 @@ Scraped data is saved to the `output/` directory with timestamped filenames:
 *   `scottishscores_games_YYYY-MM-DD_HH-MM-SS(_part_X).json`
 *   `scottishscores_athletes_YYYY-MM-DD_HH-MM-SS(_part_X).json`
 
-## Disclaimer
+## Disclaimers
 
 This tool is for educational and archival purposes. Please respect the terms of service of the websites you scrape and use the `--throttle` option to avoid overwhelming their servers.
 
 In order to cut down on the likelyhood that you get blocked by the site, I suggest a proxy. Additionally, we want to be good stewards of their bandwidth, and you should use the `--throttle` option to avoid overwhelming their servers.
 
 Additionally, the data from NASGA is not perfect (or good really). There may be issues with the schema. This is meant to be a starting point for you.
+
+NASGA Web has inherint issues both with data, and the queries used to access that data. For that reason `500`s that occur in the following format (or are in general unrecoverable) - those entries are skipped and won't be retried.
+
+```
+Microsoft JET Database Engine error '80040e07'
+
+Syntax error in date in query expression '(Games.Gamesstart >= ## AND Games.Gamesstart <= ##) AND Athletes.Firstname='XXXX' AND Athletes.Lastname='XXXX''.
+
+/dbase/resultsathlete3.asp, line 74
+```
+
+### Failure Logging
+If a game or athlete fails to download (due to 500 errors, timeouts, or parsing issues), the scraper will skip it and log the failure to a JSON file in the output directory:
+- `nasga_failed_retrievals_YYYY-MM-DD.json`
+- `heavyathlete_failed_retrievals_YYYY-MM-DD.json`
+- `scottishscores_failed_retrievals_YYYY-MM-DD.json`
+
+Check these files to see which items were missed and why.
 
 ## Troubleshooting
 If you have issues running this, try doing so in a virtual environment. 

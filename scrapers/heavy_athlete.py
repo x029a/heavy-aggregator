@@ -2,11 +2,12 @@ import logging
 import time
 from datetime import datetime
 from bs4 import BeautifulSoup
-from utils import get_async_session, async_fetch_url, StreamingJSONWriter, ColoredFormatter, parse_athlete_name
+from utils import get_async_session, async_fetch_url, StreamingJSONWriter, ColoredFormatter, parse_athlete_name, FailedItemWriter
 from checkpoint import CheckpointManager
 import re
 import os
 import asyncio
+import json
 
 logger = logging.getLogger("HeavyAggregator")
 
@@ -141,32 +142,38 @@ class HeavyAthleteScraper:
         resp_text = await async_fetch_url(session, url, settings=self.settings)
         if not resp_text: return []
         
-        # Find all game links
-        # Returns list of (gid, match_object) tuples
         games = []
-        # Pattern for ID and optional Name
-        # <a href="/game/5630/">Central Florida Highland Games</a>
-        # We find just IDs first then grep name
         
-        links = re.findall(r'href="/game/(\d+)/">([^<]+)</a>', resp_text)
-        for gid, name in links:
-             games.append({'id': gid, 'name': name.strip(), 'year': str(year), 'month': str(month)})
-             
-        # Also catch just IDs if name regex fails?
-        # links_simple = re.findall(r'href="/game/(\d+)/"', resp_text)
-        # But consistent naming is nice.
-        
-        if not links:
-             # Fallback: check for IDs without name capture (unlikely structure but safe)
-             ids = re.findall(r'href="/game/(\d+)/"', resp_text)
-             for gid in ids:
-                 # Check if we already have it
-                 if not any(g['id'] == gid for g in games):
-                     games.append({'id': gid, 'name': f"Game {gid}", 'year': str(year), 'month': str(month)})
-        
+        # Use BeautifulSoup instead of Regex
+        try:
+            soup = BeautifulSoup(resp_text, 'html.parser')
+            # Look for links like /game/123/
+            # They are usually valid game links if they have a numeric ID
+            
+            # Pattern: <a href="/game/123/">Name</a>
+            for a in soup.find_all('a', href=True):
+                 href = a['href']
+                 # Expecting /game/123/ or /game/123
+                 if '/game/' in href:
+                     # Extract digits
+                     # This accounts for /game/123/ and /game/123
+                     match = re.search(r'/game/(\d+)/?', href)
+                     if match:
+                         gid = match.group(1)
+                         name = a.get_text(strip=True)
+                         if not name: name = f"Game {gid}"
+                         
+                         # Dedup if multiple links to same game (e.g. "View" and "Title")
+                         if not any(g['id'] == gid for g in games):
+                            games.append({'id': gid, 'name': name, 'year': str(year), 'month': str(month)})
+                            
+        except Exception as e:
+            logger.warning(f"Error parsing game list with BS4 for {year}/{month}: {e}")
+            # Fallback to Regex if BS4 fails heavily?
+            
         return games
 
-    async def _scrape_game(self, session, game_info, semaphore):
+    async def _scrape_game(self, session, game_info, semaphore, failure_logger=None):
         async with semaphore:
             gid = game_info['id']
             name = game_info['name']
@@ -174,6 +181,11 @@ class HeavyAthleteScraper:
             
             scores_url = f"{self.BASE_URL}/game/{gid}/scores_htmx/"
             resp_text = await async_fetch_url(session, scores_url, settings=self.settings)
+            
+            if not resp_text:
+                if failure_logger:
+                    failure_logger.log_failure(scores_url, gid, f"Failed to fetch game scores: {name}")
+                return None
             
             game_entry = {
                 'id': gid,
@@ -199,11 +211,17 @@ class HeavyAthleteScraper:
         years = range(start_year, current_year + 2)
         
         # Output Setup
-        date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_dir = 'output'
-        if not os.path.exists(output_dir): os.makedirs(output_dir)
+        # Base Output Directory
+        base_output_dir = os.path.join('output', 'heavyathlete')
+        if not os.path.exists(base_output_dir): os.makedirs(base_output_dir)
+        
         max_lines = self.settings.get('max_output_line_count', 0)
-        games_writer = StreamingJSONWriter(output_dir, f'heavyathlete_games_{date_str}.json', max_lines)
+        
+        # Failure logger at base
+        failure_logger = FailedItemWriter(base_output_dir, 'heavyathlete_failed_retrievals.json')
+        
+        # Athlete DB
+        self.athlete_db = {}
 
         concurrency = self.settings.get('concurrency', 5)
         semaphore = asyncio.Semaphore(concurrency)
@@ -214,23 +232,40 @@ class HeavyAthleteScraper:
             for year in years:
                 logger.info(f"Scanning Year: {year}")
                 
-                # 1. Fetch all months in parallel to find games
-                month_tasks = [self._fetch_month_games(session, year, m) for m in range(1, 13)]
-                month_results = await asyncio.gather(*month_tasks)
+                # Setup Year Directory
+                year_dir = os.path.join(base_output_dir, str(year))
+                if not os.path.exists(year_dir):
+                    os.makedirs(year_dir)
                 
-                # Flatten list of games
-                year_games = [g for months in month_results for g in months]
+                # Year-specific Games Writer
+                year_games_writer = StreamingJSONWriter(year_dir, 'heavyathlete_games.json', max_lines)
                 
-                if year_games:
-                    logger.info(f"  Found {len(year_games)} games in {year}. Fetching details...")
+                try:
+                    # 1. Fetch all months in parallel to find games
+                    month_tasks = [self._fetch_month_games(session, year, m) for m in range(1, 13)]
+                    month_results = await asyncio.gather(*month_tasks)
                     
-                    # 2. Fetch game details in parallel
-                    game_tasks = [self._scrape_game(session, g, semaphore) for g in year_games]
-                    results = await asyncio.gather(*game_tasks)
+                    # Flatten list of games
+                    year_games = [g for months in month_results for g in months]
                     
-                    for res in results:
-                        if res:
-                            games_writer.write_item(res)
+                    if year_games:
+                        logger.info(f"  Found {len(year_games)} games in {year}. Fetching details...")
+                        
+                        # 2. Fetch game details in parallel
+                        game_tasks = [self._scrape_game(session, g, semaphore, failure_logger) for g in year_games]
+                        results = await asyncio.gather(*game_tasks)
+                        
+                        for res in results:
+                            if res:
+                                year_games_writer.write_item(res)
+                                self._update_athlete_db(res)
+                                
+                finally:
+                    year_games_writer.close()
+                
+                # Save Athletes
+                self._save_athletes(base_output_dir)
+                logger.info(f"  Saved {len(self.athlete_db)} athletes to heavyathlete_athletes.json")
                 
                 # Update Checkpoint
                 self.checkpoint.save("heavyathlete_year", year + 1)
@@ -239,7 +274,59 @@ class HeavyAthleteScraper:
             logger.exception(f"Error during scraping: {e}")
             raise
         finally:
-            games_writer.close()
             await session.close()
             logger.info("Heavy Athlete Scraping Complete.")
+
+    def _update_athlete_db(self, game_result):
+        # game_result: {id, name, year, month, source, results: {Class: [entries]}}
+        month = game_result.get('month', '1')
+        year = game_result.get('year', '2000')
+        # Approximate date
+        date_str = f"{month}/1/{year}"
+        
+        game_log_info = {
+            'Date': date_str,
+            'Game': game_result.get('name'),
+            'GameID': game_result.get('id'),
+            'Year': year
+        }
+
+        for cls, athletes in game_result.get('results', {}).items():
+            for ath in athletes:
+                name = ath.get('Athlete')
+                if not name: continue
+                
+                if name not in self.athlete_db:
+                    self.athlete_db[name] = {
+                        'name': name,
+                        'history': []
+                    }
+                
+                entry = {
+                    'Date': game_log_info['Date'],
+                    'Game': game_log_info['Game'],
+                    'GameID': game_log_info['GameID'], # Added for dedupe
+                    'Class': cls,
+                    'Place': ath.get('Place'),
+                    'Points': ath.get('GamesPoints')
+                }
+                
+                # Check for duplicates
+                exists = False
+                for existing in self.athlete_db[name]['history']:
+                    if existing.get('GameID') == entry['GameID'] and existing.get('Class') == entry['Class']:
+                         exists = True
+                         break
+                
+                if not exists:
+                    self.athlete_db[name]['history'].append(entry)
+
+    def _save_athletes(self, base_dir):
+        path = os.path.join(base_dir, 'heavyathlete_athletes.json')
+        try:
+            data = list(self.athlete_db.values())
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save athletes file: {e}")
 

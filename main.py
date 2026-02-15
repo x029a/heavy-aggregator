@@ -82,12 +82,12 @@ def main():
             else: print("Invalid format, keeping default.")
             
         # Max Output Lines
-        default = settings.get('max_output_line_count', 0)
-        val = input(f"Split output after N lines (0 = no split) [{default}]: ").strip()
-        if val:
-            try: settings['max_output_line_count'] = int(val)
-            except ValueError: print("Invalid integer, keeping default.")
-            
+        # Hidden from interactive prompt, defaults to 0 (no split) unless set in settings/env
+        if settings.get('max_output_line_count') is None:
+             settings['max_output_line_count'] = 0
+
+        print("\nNOTE: Game results will be stored in year-based directories (e.g., output/nasga/1996/).")
+        
         # Upload Prompt
         print("\n--- Remote Upload ---")
         print("Would you like to auto-upload results?")

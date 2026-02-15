@@ -1,7 +1,7 @@
 from . import Scraper
 import logging
 from bs4 import BeautifulSoup
-from utils import get_async_session, async_fetch_url, StreamingJSONWriter, parse_athlete_name
+from utils import get_async_session, async_fetch_url, StreamingJSONWriter, parse_athlete_name, FailedItemWriter
 from checkpoint import CheckpointManager
 import json
 import csv
@@ -25,20 +25,20 @@ class NasgaScraper(Scraper):
         session = await get_async_session(self.settings)
         
         # Setup Output Files
-        from datetime import datetime
-        date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_dir = 'output'
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        base_output_dir = os.path.join('output', 'nasga')
+        if not os.path.exists(base_output_dir):
+            os.makedirs(base_output_dir)
 
         max_lines = self.settings.get('max_output_line_count', 0)
         
-        # Initialize Writers
-        games_writer = StreamingJSONWriter(output_dir, f'nasga_games_{date_str}.json', max_lines)
-        athletes_writer = StreamingJSONWriter(output_dir, f'nasga_athletes_{date_str}.json', max_lines)
+        # Initialize Writers (Failures at base)
+        failure_logger = FailedItemWriter(base_output_dir, 'nasga_failed_retrievals.json')
         
         concurrency = self.settings.get('concurrency', 5)
         semaphore = asyncio.Semaphore(concurrency)
+
+        # Athlete Aggregation DB
+        self.athlete_db = {}
 
         try:
             # 1. Get Years
@@ -49,16 +49,11 @@ class NasgaScraper(Scraper):
                 return
 
             logger.info(f"Found {len(years)} years to process: {years}")
-
-            unique_athletes = set()
             
             # Resume Logic for Years
             start_year_idx = 0
             saved_year = self.checkpoint.get("nasga_last_completed_year")
             if saved_year and saved_year in years:
-                # If we saved 2000, we want to start at the NEXT one? 
-                # Or simply years handled. Since years list is reversed (2025, 2024...), 
-                # identifying index is safer.
                 try:
                     idx = years.index(saved_year)
                     start_year_idx = idx + 1 # Start with next
@@ -66,100 +61,120 @@ class NasgaScraper(Scraper):
                 except ValueError:
                     pass
 
-            # 2. Iterate Years to collect Games and Athletes
-            # Phase 1: Games and Athlete Discovery
+            # 2. Iterate Years to collect Games and Build Athlete History
             for i in range(start_year_idx, len(years)):
                 year = years[i]
                 logger.info(f"Scanning Year: {year}")
                 
-                year_url = f"{self.BASE_URL}?resultsyear={year}"
-                resp_text = await async_fetch_url(session, year_url, settings=self.settings)
-                if not resp_text: continue
-
-                soup = BeautifulSoup(resp_text, 'html.parser')
+                # Setup Year Directory
+                year_dir = os.path.join(base_output_dir, str(year))
+                if not os.path.exists(year_dir):
+                    os.makedirs(year_dir)
+                    
+                year_games_writer = StreamingJSONWriter(year_dir, 'nasga_games.json', max_lines)
                 
-                # Get Games
-                games = self.get_dropdown_options(soup, 'gamesid')
-                valid_games = {}
-                for name, value in games.items():
-                     if value and value not in ['0', 'none', ''] and not name.startswith('Select') and not name.startswith('---'):
-                         valid_games[value] = name
-
-                logger.info(f"  Found {len(valid_games)} games.")
-
-                # Scrape Games for this Year (Parallel)
-                game_tasks = []
-                for game_id, game_name in valid_games.items():
-                    game_tasks.append(self.scrape_game_async(session, game_id, game_name, year, semaphore))
+                try:
+                    year_url = f"{self.BASE_URL}?resultsyear={year}"
+                    resp_text = await async_fetch_url(session, year_url, settings=self.settings)
+                    if not resp_text: continue
+    
+                    soup = BeautifulSoup(resp_text, 'html.parser')
+                    
+                    # Get Games
+                    games = self.get_dropdown_options(soup, 'gamesid')
+                    valid_games = {}
+                    for name, value in games.items():
+                         if value and value not in ['0', 'none', ''] and not name.startswith('Select') and not name.startswith('---'):
+                             valid_games[value] = name
+    
+                    logger.info(f"  Found {len(valid_games)} games.")
+    
+                    # Scrape Games for this Year (Parallel)
+                    game_tasks = []
+                    for game_id, game_name in valid_games.items():
+                        game_tasks.append(self.scrape_game_async(session, game_id, game_name, year, semaphore, failure_logger))
+                    
+                    game_results = await asyncio.gather(*game_tasks)
+                    
+                    for res in game_results:
+                        if res:
+                            year_games_writer.write_item(res)
+                            # Update Athlete DB
+                            self._update_athlete_db(res)
+                            
+                finally:
+                    year_games_writer.close()
                 
-                game_results = await asyncio.gather(*game_tasks)
-                
-                for res in game_results:
-                    if res:
-                        games_writer.write_item(res)
-                
-                # Get Athletes (Collect only)
-                # We need to collect ALL athletes across all years first before Phase 2?
-                # Or can we assume we scrape athletes at the end?
-                # Yes, standard flow is: Games (Year 1..N) -> Then Athletes (A..Z)
-                # We save unique_athletes in memory. If crashed, we might lose 'discovered' athletes?
-                # Ideally we should checkpoint discovered athletes too?
-                # For simplicity: Re-scanning years to discover athletes is fast. 
-                # Re-scraping games is slow. We checkpoint "Games Done".
-                
-                athletes = self.get_dropdown_options(soup, 'athletename')
-                for name, value in athletes.items():
-                    if value and value != '0' and not name.startswith('Select'):
-                        unique_athletes.add(value)
-                
-                logger.info(f"  Accumulated {len(unique_athletes)} unique athletes so far.")
+                # Save/Update Accumulated Athletes
+                self._save_athletes(base_output_dir)
+                logger.info(f"  Saved {len(self.athlete_db)} athletes to nasga_athletes.json")
                 
                 # Save Checkpoint
                 self.checkpoint.save("nasga_last_completed_year", year)
 
-            # Phase 2: Athlete Details
-            sorted_athletes = sorted(list(unique_athletes))
-            logger.info(f"Scraping details for {len(sorted_athletes)} athletes...")
-            
-            # Resume Logic for Athletes
-            # If we crashed during athlete phase, we check `nasga_athlete_index`
-            start_ath_idx = self.checkpoint.get("nasga_athlete_index", 0)
-            if start_ath_idx > 0:
-                 logger.info(f"Resuming Athlete scraping from index {start_ath_idx}...")
-
-            # Process in chunks to avoid massive memory usage / task list
-            # But asyncio.gather is fine for thousands if semaphore used.
-            # Let's simple loop with semaphore passing or chunks.
-            
-            BATCH_SIZE = 50
-            for i in range(start_ath_idx, len(sorted_athletes), BATCH_SIZE):
-                batch = sorted_athletes[i : i + BATCH_SIZE]
-                tasks = []
-                for ath_name in batch:
-                     tasks.append(self.scrape_athlete_async(session, ath_name, semaphore))
-                
-                results = await asyncio.gather(*tasks)
-                
-                for res in results:
-                    if res:
-                        athletes_writer.write_item(res)
-                
-                # Checkpoint
-                self.checkpoint.save("nasga_athlete_index", i + len(batch))
-                if i % 100 == 0:
-                     logger.info(f"  Processed {i + len(batch)}/{len(sorted_athletes)} athletes...")
-            
             logger.info("NASGA Scraping Complete.")
-            
-            # Clear checkpoint on success?
-            # self.checkpoint.clear()
-            # Maybe keep it to prevent accidental re-run? 
-            # User can delete if they want fresh start.
 
         finally:
-            games_writer.close()
-            athletes_writer.close()
             await session.close()
+
+    def _update_athlete_db(self, game_result):
+        # Extract athletes from game results
+        # Structure: game_result['results'] = { 'Class': [ { 'Athlete': 'Name', ... } ] }
+        game_info = {
+            'Date': game_result.get('name', '').split(',')[-1].strip(), # Approximate date from name
+            'Game': game_result.get('name'),
+            'GameID': game_result.get('id'),
+            'Year': game_result.get('year')
+        }
+        
+        for cls, athletes in game_result.get('results', {}).items():
+            for ath in athletes:
+                name = ath.get('Athlete')
+                if not name: continue
+                
+                # Normalize name?
+                # Using cleaned name as key
+                if name not in self.athlete_db:
+                    self.athlete_db[name] = {
+                        'name': name,
+                        'history': []
+                    }
+                
+                # Create History Entry
+                entry = {
+                    'Date': game_info['Date'],
+                    'Game': game_info['Game'],
+                    'GameID': game_info['GameID'], # Added for dedupe
+                    'Class': cls,
+                    'Place': ath.get('Place'),
+                    'Points': ath.get('GamesPoints')
+                }
+                
+                # Check for duplicates
+                # Same GameID and Class?
+                exists = False
+                for existing in self.athlete_db[name]['history']:
+                    if existing.get('GameID') == entry['GameID'] and existing.get('Class') == entry['Class']:
+                         exists = True
+                         break
+                    # Fallback for older entries without GameID? (Unlikely in this refactor)
+                    if not existing.get('GameID') and existing.get('Date') == entry['Date'] and existing.get('Game') == entry['Game'] and existing.get('Class') == entry['Class']:
+                         exists = True
+                         break
+                
+                if not exists:
+                    self.athlete_db[name]['history'].append(entry)
+
+    def _save_athletes(self, base_dir):
+        # Overwrite the athletes file with current DB
+        path = os.path.join(base_dir, 'nasga_athletes.json')
+        try:
+            # Convert dict to list
+            data = list(self.athlete_db.values())
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save athletes file: {e}")
 
     async def get_years(self, session):
         resp_text = await async_fetch_url(session, self.BASE_URL, settings=self.settings)
@@ -273,12 +288,15 @@ class NasgaScraper(Scraper):
                      structured_results[current_class].append(athlete_data)
         return structured_results
 
-    async def scrape_game_async(self, session, game_id, game_name, year, semaphore):
+    async def scrape_game_async(self, session, game_id, game_name, year, semaphore, failure_logger=None):
         async with semaphore:
             logger.info(f"    Scraping Game: {game_name} ({game_id})")
             data = {'gamesid': game_id, 'Submit': 'Select'}
             resp_text = await async_fetch_url(session, self.RESULTS_URL, method='POST', data=data, settings=self.settings)
-            if not resp_text: return None
+            if not resp_text:
+                if failure_logger:
+                    failure_logger.log_failure(self.RESULTS_URL, game_id, f"Failed to fetch game results for {game_name} ({year})")
+                return None
             
             soup = BeautifulSoup(resp_text, 'html.parser')
             tables_data = []
@@ -298,27 +316,7 @@ class NasgaScraper(Scraper):
                 'results': structured_data
             }
 
-    async def scrape_athlete_async(self, session, ath_name, semaphore):
-        async with semaphore:
-            encoded_name = urllib.parse.quote(ath_name)
-            url = f"{self.ATHLETE_URL}?athletename={encoded_name}"
-            resp_text = await async_fetch_url(session, url, settings=self.settings)
-            if not resp_text: return None
-            
-            soup = BeautifulSoup(resp_text, 'html.parser')
-            tables_data = []
-            for table in soup.find_all('table'):
-                 t_rows = []
-                 for row in table.find_all('tr'):
-                     cols = [ele.get_text(strip=True) for ele in row.find_all(['td', 'th'])]
-                     t_rows.append(cols)
-                 if t_rows:
-                     tables_data.append(t_rows)
-            
-            return {
-                'name': parse_athlete_name(ath_name),
-                'history': tables_data
-            }
+
 
 
 

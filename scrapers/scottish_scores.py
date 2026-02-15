@@ -2,7 +2,7 @@ from . import Scraper
 import logging
 import asyncio
 from bs4 import BeautifulSoup
-from utils import get_async_session, async_fetch_url, StreamingJSONWriter, parse_athlete_name
+from utils import get_async_session, async_fetch_url, StreamingJSONWriter, parse_athlete_name, FailedItemWriter
 from checkpoint import CheckpointManager
 
 # ... (rest of imports)
@@ -11,6 +11,7 @@ from checkpoint import CheckpointManager
 import os
 import urllib.parse
 import re
+import json
 
 logger = logging.getLogger("HeavyAggregator")
 
@@ -30,13 +31,18 @@ class ScottishScoresScraper(Scraper):
 
         # Output Setup
         from datetime import datetime
-        date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_dir = 'output'
-        if not os.path.exists(output_dir): os.makedirs(output_dir)
+        now = datetime.now()
+        # Base Output Directory
+        base_output_dir = os.path.join('output', 'scottishscores')
+        if not os.path.exists(base_output_dir): os.makedirs(base_output_dir)
+
         max_lines = self.settings.get('max_output_line_count', 0)
 
-        games_writer = StreamingJSONWriter(output_dir, f'scottishscores_games_{date_str}.json', max_lines)
-        athletes_writer = StreamingJSONWriter(output_dir, f'scottishscores_athletes_{date_str}.json', max_lines)
+        # Initialize Writers (Failures at base)
+        failure_logger = FailedItemWriter(base_output_dir, 'scottishscores_failed_retrievals.json')
+        
+        # Athlete DB
+        self.athlete_db = {}
 
         concurrency = self.settings.get('concurrency', 5)
         semaphore = asyncio.Semaphore(concurrency)
@@ -44,7 +50,7 @@ class ScottishScoresScraper(Scraper):
         try:
             # 1. Scrape Games (Iterate Years)
             start_year = 1990
-            end_year = datetime.now().year + 1
+            end_year = now.year + 1
             years = list(range(start_year, end_year + 1))
             
             # Resume Year
@@ -60,70 +66,110 @@ class ScottishScoresScraper(Scraper):
             for year in years:
                 logger.info(f"Scanning Year: {year}")
                 
-                # Switch Session Year
-                # The site uses POST to SessionYrSet.cfm to set the year in session
-                post_data = {'FilterYear': str(year)}
-                # We don't really care about the response body, just the cookie/session update
-                await async_fetch_url(session, self.SESSION_SET_URL, method='POST', data=post_data, settings=self.settings)
-                
-                # Now fetch Index to get games for this year
-                idx_resp = await async_fetch_url(session, self.INDEX_URL, settings=self.settings)
-                if not idx_resp:
-                    logger.warning(f"Failed to fetch index for {year}")
-                    continue
+                # Setup Year Directory
+                year_dir = os.path.join(base_output_dir, str(year))
+                if not os.path.exists(year_dir):
+                    os.makedirs(year_dir)
 
-                games = self.parse_games_list(idx_resp)
-                logger.info(f"  Found {len(games)} games in {year}.")
+                # Year-specific Games Writer
+                year_games_writer = StreamingJSONWriter(year_dir, 'scottishscores_games.json', max_lines)
                 
-                # Scrape detailed games in parallel
-                game_tasks = [self.scrape_game_detail(session, g, semaphore) for g in games]
-                results = await asyncio.gather(*game_tasks)
-                
-                for res in results:
-                    if res:
-                        games_writer.write_item(res)
-                
-                self.checkpoint.save("scottishscores_year", year)
-
-            # 2. Scrape Athletes (Master List)
-            # Strategy: Get master list -> Resume/Filter -> Scrape Details
-            logger.info("Fetching Athlete Master List...")
-            master_resp = await async_fetch_url(session, self.ATHLETE_LIST_URL, settings=self.settings)
-            
-            if master_resp:
-                athletes = self.parse_athlete_list(master_resp)
-                logger.info(f"Found {len(athletes)} unique athletes.")
-                
-                # Resume Athlete Index
-                start_ath = self.checkpoint.get("scottishscores_athlete_idx", 0)
-                if start_ath > 0:
-                    logger.info(f"Resuming athletes from index {start_ath}...")
-                    athletes = athletes[start_ath:]
-                
-                # Chunking
-                BATCH_SIZE = 50
-                total = len(athletes)
-                base_idx = start_ath
-                
-                for i in range(0, len(athletes), BATCH_SIZE):
-                    batch = athletes[i : i + BATCH_SIZE]
-                    tasks = [self.scrape_athlete_detail(session, a, semaphore) for a in batch]
-                    results = await asyncio.gather(*tasks)
+                try:
+                    # Switch Session Year
+                    post_data = {'FilterYear': str(year)}
+                    await async_fetch_url(session, self.SESSION_SET_URL, method='POST', data=post_data, settings=self.settings)
+                    
+                    # Now fetch Index to get games for this year
+                    idx_resp = await async_fetch_url(session, self.INDEX_URL, settings=self.settings)
+                    if not idx_resp:
+                        logger.warning(f"Failed to fetch index for {year}")
+                        continue
+    
+                    games = self.parse_games_list(idx_resp)
+                    logger.info(f"  Found {len(games)} games in {year}.")
+                    
+                    # Scrape detailed games in parallel
+                    game_tasks = [self.scrape_game_detail(session, g, semaphore, failure_logger) for g in games]
+                    results = await asyncio.gather(*game_tasks)
                     
                     for res in results:
                         if res:
-                            athletes_writer.write_item(res)
-                    
-                    current_processed = base_idx + i + len(batch)
-                    self.checkpoint.save("scottishscores_athlete_idx", current_processed)
-                    if i % 100 == 0:
-                        logger.info(f"  Processed {current_processed}/{total + base_idx} athletes...")
+                            year_games_writer.write_item(res)
+                            self._update_athlete_db(res, year)
+                            
+                finally:
+                    year_games_writer.close()
+                
+                # Save Athletes
+                self._save_athletes(base_output_dir)
+                logger.info(f"  Saved {len(self.athlete_db)} athletes to scottishscores_athletes.json")
+                
+                self.checkpoint.save("scottishscores_year", year)
+
+            logger.info("ScottishScores Scraping Complete.")
 
         finally:
-            games_writer.close()
-            athletes_writer.close()
             await session.close()
-            logger.info("ScottishScores Scraping Complete.")
+
+    def _update_athlete_db(self, game_result, year):
+        # game_result: {id, name, results: {Class: [entries]}}
+        # Check if name starts with date? "MM/DD/YYYY - Name" or similar logic from parse_games_list
+        # But here game_result['name'] is what we parsed.
+        
+        game_name = game_result.get('name', 'Unknown Game')
+        # Try to extract date
+        date_str = f"01/01/{year}" # Default
+        
+        # Simple heuristic: see if name starts with digit
+        parts = game_name.split(' - ', 1)
+        if len(parts) > 1 and parts[0][0].isdigit():
+             date_str = parts[0]
+        
+        game_log_info = {
+            'Date': date_str,
+            'Game': game_name,
+            'GameID': game_result.get('id'),
+            'Year': year
+        }
+
+        for cls, athletes in game_result.get('results', {}).items():
+            for ath in athletes:
+                name = ath.get('Athlete')
+                if not name: continue
+                
+                if name not in self.athlete_db:
+                    self.athlete_db[name] = {
+                        'name': name,
+                        'history': []
+                    }
+                
+                entry = {
+                    'Date': game_log_info['Date'],
+                    'Game': game_log_info['Game'],
+                    'GameID': game_log_info['GameID'], # Added for dedupe
+                    'Class': cls,
+                    'Place': ath.get('Place'),
+                    'Points': ath.get('GamesPoints')
+                }
+                
+                # Check for duplicates
+                exists = False
+                for existing in self.athlete_db[name]['history']:
+                    if existing.get('GameID') == entry['GameID'] and existing.get('Class') == entry['Class']:
+                         exists = True
+                         break
+                
+                if not exists:
+                    self.athlete_db[name]['history'].append(entry)
+
+    def _save_athletes(self, base_dir):
+        path = os.path.join(base_dir, 'scottishscores_athletes.json')
+        try:
+            data = list(self.athlete_db.values())
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save athletes file: {e}")
 
     def parse_games_list(self, html):
         soup = BeautifulSoup(html, 'html.parser')
@@ -138,82 +184,30 @@ class ScottishScoresScraper(Scraper):
                     qs = urllib.parse.parse_qs(parsed.query)
                     code = qs.get('GameCode', [''])[0]
                     if code:
+                        # Fix for "View" as name
                         name = a.get_text(strip=True)
+                        if name == "View":
+                            # Try to find name in the row
+                            row = a.find_parent('tr')
+                            if row:
+                                cols = row.find_all('td')
+                                if cols and len(cols) > 0:
+                                     # Assuming First Column is Date, Second is Name? Or First is Name.
+                                     # Inspection needed or heuristic. 
+                                     # Usually: Date | Game Name | View
+                                     # Let's try to get the text from the cell *before* the link's cell?
+                                     # Or just grab all text from row excluding "View"
+                                     row_text = [td.get_text(strip=True) for td in cols if "View" not in td.get_text()]
+                                     # Join meaningful parts
+                                     candidate = " - ".join([t for t in row_text if t])
+                                     if candidate: name = candidate
+                                     
                         games.append({'id': code, 'name': name, 'url': href})
                 except Exception:
                     pass
         return games
 
-    def parse_athlete_list(self, html):
-        soup = BeautifulSoup(html, 'html.parser')
-        athletes = []
-        # Links: rankingHistory.cfm?FN=...&LN=...&SysID=...
-        seen_ids = set()
-        
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if 'rankingHistory.cfm' in href and 'SysID=' in href:
-                 try:
-                    parsed = urllib.parse.urlparse(href)
-                    qs = urllib.parse.parse_qs(parsed.query)
-                    sys_id = qs.get('SysID', [''])[0]
-                    fn = qs.get('FN', [''])[0]
-                    ln = qs.get('LN', [''])[0]
-                    
-                    if sys_id and sys_id not in seen_ids:
-                        seen_ids.add(sys_id)
-                        athletes.append({
-                            'id': sys_id,
-                            'first_name': fn,
-                            'last_name': ln,
-                            'url': href
-                        })
-                 except Exception:
-                     pass
-        return athletes
 
-    async def scrape_game_detail(self, session, game_meta, semaphore):
-        async with semaphore:
-            url = f"{self.BASE_URL}/{game_meta['url']}"
-            resp = await async_fetch_url(session, url, settings=self.settings)
-            if not resp: return None
-            
-            soup = BeautifulSoup(resp, 'html.parser')
-            # Look for tables with results
-            # Similar logic to NASGA: Identify Class headers and rows
-            
-            results = self.parse_game_results_table(soup)
-            
-            return {
-                'id': game_meta['id'],
-                'name': game_meta['name'],
-                'results': results
-            }
-
-    async def scrape_athlete_detail(self, session, ath_meta, semaphore):
-        async with semaphore:
-            # url is relative
-            url = f"{self.BASE_URL}/{ath_meta['url']}"
-            resp = await async_fetch_url(session, url, settings=self.settings)
-            if not resp: return None
-            
-            soup = BeautifulSoup(resp, 'html.parser')
-            # Look for history table
-            history = []
-            # Simplified table parsing: dump rows
-            for table in soup.find_all('table'):
-                rows = []
-                for tr in table.find_all('tr'):
-                     cols = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
-                     if cols: rows.append(cols)
-                if len(rows) > 1: # Header + Data
-                    history.append(rows)
-            
-            return {
-                'id': ath_meta['id'],
-                'name': parse_athlete_name(f"{ath_meta['first_name']} {ath_meta['last_name']}"),
-                'history': history
-            }
 
     def parse_clean_distance(self, text):
         # Handle "44 - 9" -> 44.75
@@ -239,6 +233,12 @@ class ScottishScoresScraper(Scraper):
             
         return text
 
+    def clean_text(self, text):
+        if isinstance(text, str):
+            # Replace non-breaking space with space, strip whitespace
+            return text.replace('\u00a0', ' ').strip()
+        return text
+
     def parse_game_results_table(self, soup):
         structured = {}
         current_class = "Unknown"
@@ -250,7 +250,8 @@ class ScottishScoresScraper(Scraper):
         all_rows = []
         for table in soup.find_all('table'):
             for tr in table.find_all('tr'):
-                cols = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
+                # Clean every cell immediately
+                cols = [self.clean_text(td.get_text()) for td in tr.find_all(['td', 'th'])]
                 if cols:
                     all_rows.append(cols)
         
@@ -264,7 +265,17 @@ class ScottishScoresScraper(Scraper):
             if len(row) < 3 and len(first_cell) > 3 and not "Athlete" in row and not "Print" in first_cell:
                  # Check if it's junk
                  if "View" in first_cell or "Done" in first_cell: continue
-                 current_class = first_cell
+                 
+                 # Fix for "JUNIORS    Christena..."
+                 # Split by multiple spaces if present, or just assume first token if it looks like a class?
+                 # Better: If > 2 spaces? Or just split on double space.
+                 # "JUNIORS\u00a0\u00a0..." -> "JUNIORS" (already cleaned to "JUNIORS  ...")
+                 # Using regex to split on 2 or more whitespace characters
+                 parts = re.split(r'\s{2,}', first_cell)
+                 potential_class = parts[0].strip()
+                 
+                 current_class = potential_class
+                 
                  if current_class not in structured:
                      structured[current_class] = []
                  event_headers = [] # Reset headers for new class
@@ -308,8 +319,7 @@ class ScottishScoresScraper(Scraper):
                 entry = {
                     'Athlete': parse_athlete_name(ath_name),
                     'Place': place_raw,
-                    'Points': points_raw,
-                    'Results': {}
+                    'GamesPoints': points_raw, # Renamed from Points
                 }
                 
                 # Parse Events
@@ -323,7 +333,8 @@ class ScottishScoresScraper(Scraper):
                         evt_name = event_headers[i]
                         parsed_val = self.parse_clean_distance(val)
                         if parsed_val:
-                            entry['Results'][evt_name] = parsed_val
+                            # Flatten: Add directly to entry
+                            entry[evt_name] = parsed_val
                 
                 if current_class not in structured:
                     structured[current_class] = []
