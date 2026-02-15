@@ -3,7 +3,7 @@ import Controls from './components/Controls';
 import Terminal from './components/Terminal';
 import FileBrowser from './components/FileBrowser';
 import DataViewer from './components/DataViewer';
-import { Activity, Database, Server } from 'lucide-react';
+import { Activity, Database, Server, Square } from 'lucide-react';
 import './App.css';
 
 function App() {
@@ -22,11 +22,11 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const startScraper = (site) => {
+  const startScraper = (site, settings) => {
     fetch('/api/scrape', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ site })
+      body: JSON.stringify({ site, settings })
     }).catch(err => console.error(err));
   };
 
@@ -34,11 +34,19 @@ function App() {
     fetch('/api/stop', { method: 'POST' }).catch(err => console.error(err));
   };
 
+  const shutdownServer = () => {
+    if (confirm("Are you sure you want to shut down the server?")) {
+      fetch('/api/shutdown', { method: 'POST' })
+        .then(() => alert("Server shutting down..."))
+        .catch(err => console.error(err));
+    }
+  };
+
   return (
     <div className="app-container">
       <nav className="sidebar">
         <div className="logo">
-          <Server size={24} /> HeavyAgg
+          <Server size={24} /> Heavy Aggregator
         </div>
         <button
           className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
@@ -51,6 +59,14 @@ function App() {
           onClick={() => setActiveTab('files')}
         >
           <Database size={20} /> Data Explorer
+        </button>
+
+        <div className="spacer" style={{ flex: 1 }}></div>
+
+        <button className="nav-item shutdown-btn" onClick={shutdownServer}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#ff4444' }}>
+            <Square size={16} fill="currentColor" /> Shutdown Server
+          </div>
         </button>
       </nav>
 

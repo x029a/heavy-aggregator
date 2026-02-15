@@ -1,45 +1,53 @@
 import React, { useState, useEffect } from 'react';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 export default function DataViewer({ filePath }) {
     const [content, setContent] = useState(null);
     const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
+    // Removed error state as per instruction
 
     useEffect(() => {
         if (!filePath) {
-            setContent(null);
+            setContent(null); // Clear content when no file is selected
             return;
         }
 
         setLoading(true);
-        fetch(`/api/files/content?path=${filePath}`)
+        // Updated fetch URL to encodeURIComponent and simplified error handling
+        fetch(`/api/files/content?path=${encodeURIComponent(filePath)}`)
             .then(res => {
                 if (!res.ok) throw new Error("Failed to load file");
                 return res.text();
             })
             .then(text => {
-                try {
-                    const json = JSON.parse(text);
-                    setContent(json);
-                    setError(null);
-                } catch {
-                    setContent(text); // Fallback to text
-                    setError(null);
-                }
+                // Simplified content setting, removed JSON.parse try/catch as SyntaxHighlighter will handle it
+                setContent(text);
+                // Removed error state clearing
             })
-            .catch(err => setError(err.message))
-            .finally(() => setLoading(false));
+            .catch(err => {
+                console.error(err); // Log error
+                setContent("Error loading file."); // Display generic error message
+                // Removed error state setting
+            })
+            .finally(() => setLoading(false)); // Ensure loading is always set to false
     }, [filePath]);
 
-    if (!filePath) return <div className="viewer-placeholder">Select a file to view content</div>;
-    if (loading) return <div className="viewer-loading">Loading...</div>;
-    if (error) return <div className="viewer-error">{error}</div>;
+    if (!filePath) return <div className="data-viewer-empty">Select a file to view content</div>; // Updated class name
+    if (loading) return <div className="data-viewer-loading">Loading...</div>; // Updated class name
+    // Removed if (error) block as per instruction
 
     return (
         <div className="data-viewer">
-            <h3>{filePath}</h3>
-            <div className="content-scroll">
-                <pre>{typeof content === 'object' ? JSON.stringify(content, null, 2) : content}</pre>
+            <div className="file-header">{filePath}</div> {/* Changed h3 to div with class */}
+            <div className="file-content-wrapper"> {/* New wrapper div */}
+                <SyntaxHighlighter
+                    language="json" // Assuming content is JSON or should be highlighted as such
+                    style={vscDarkPlus}
+                    customStyle={{ margin: 0, padding: '1rem', background: 'transparent' }}
+                >
+                    {content || ''} {/* Display content, or empty string if null */}
+                </SyntaxHighlighter>
             </div>
         </div>
     );

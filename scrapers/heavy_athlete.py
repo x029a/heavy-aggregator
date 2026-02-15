@@ -2,7 +2,7 @@ import logging
 import time
 from datetime import datetime
 from bs4 import BeautifulSoup
-from utils import get_async_session, async_fetch_url, StreamingJSONWriter, ColoredFormatter, parse_athlete_name, FailedItemWriter
+from utils import get_async_session, async_fetch_url, StreamingJSONWriter, ColoredFormatter, parse_athlete_name, FailedItemWriter, parse_distance
 from checkpoint import CheckpointManager
 import re
 import os
@@ -38,34 +38,7 @@ class HeavyAthleteScraper:
             return text
 
     def parse_distance(self, text):
-        if not text:
-            return None
-        text = str(text).strip()
-        if text.upper() in ['NT', 'DNS', '-', '', 'F']:
-            return None
-        
-        if ':' in text: return text # Time
-        
-        # 20'-4"
-        match = re.match(r"(\d+)'\s*-?\s*(\d*\.?\d*)\"?", text)
-        if match:
-            feet = float(match.group(1))
-            inches_str = match.group(2)
-            inches = float(inches_str) if inches_str else 0
-            return round(feet + (inches / 12.0), 3)
-        
-        # 20'
-        match_ft = re.match(r"(\d+)'$", text)
-        if match_ft:
-            return float(match_ft.group(1))
-
-        # Check for numeric
-        try:
-            return float(text)
-        except ValueError:
-            pass
-            
-        return text
+        return parse_distance(text)
 
     def parse_scores_html(self, html_content):
         if not html_content: return {}

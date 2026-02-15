@@ -78,7 +78,8 @@ body {
   overflow: hidden;
 }
 
-.dashboard-view, .files-view {
+.dashboard-view,
+.files-view {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -102,6 +103,7 @@ header h1 {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 2rem;
 }
 
 .status-indicator {
@@ -111,14 +113,29 @@ header h1 {
   gap: 0.5rem;
 }
 
-.status-idle { color: var(--text-secondary); font-weight: bold; }
-.status-running { color: var(--success); font-weight: bold; }
+.status-idle {
+  color: var(--text-secondary);
+  font-weight: bold;
+}
+
+.status-running {
+  color: var(--success);
+  font-weight: bold;
+}
 
 .spinner {
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 .button-group {
   display: flex;
@@ -139,6 +156,68 @@ button {
   font-weight: 500;
 }
 
+/* ... existing styles ... */
+.controls-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 100%;
+}
+
+.settings-toggle {
+  background: transparent;
+  border: 1px solid #444;
+  color: #aaa;
+  margin-left: auto;
+}
+
+.settings-toggle:hover {
+  background: #333;
+  color: #fff;
+}
+
+.settings-panel {
+  display: flex;
+  gap: 2rem;
+  padding: 1rem;
+  background: #1e1e1e;
+  border-radius: 8px;
+  border: 1px solid #333;
+  animation: slideDown 0.2s ease-out;
+}
+
+.setting-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.setting-item label {
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.setting-item input {
+  background: #252525;
+  border: 1px solid #444;
+  color: #fff;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  width: 60px;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 button:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
@@ -153,6 +232,7 @@ button:disabled {
   border-color: var(--danger);
   color: var(--danger);
 }
+
 .stop-btn:hover:not(:disabled) {
   background-color: var(--danger);
   color: white;
@@ -166,7 +246,8 @@ button:disabled {
   padding: 1rem;
   font-family: 'Fira Code', monospace;
   font-size: 0.85rem;
-  color: #a3e635; /* Lime green */
+  color: #a3e635;
+  /* Lime green */
   overflow-y: auto;
   border: 1px solid var(--border);
 }

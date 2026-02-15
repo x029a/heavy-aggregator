@@ -2,7 +2,7 @@ from . import Scraper
 import logging
 import asyncio
 from bs4 import BeautifulSoup
-from utils import get_async_session, async_fetch_url, StreamingJSONWriter, parse_athlete_name, FailedItemWriter
+from utils import get_async_session, async_fetch_url, StreamingJSONWriter, parse_athlete_name, FailedItemWriter, parse_distance
 from checkpoint import CheckpointManager
 
 # ... (rest of imports)
@@ -210,28 +210,7 @@ class ScottishScoresScraper(Scraper):
 
 
     def parse_clean_distance(self, text):
-        # Handle "44 - 9" -> 44.75
-        if not text: return None
-        text = text.strip()
-        if not text or text == '-': return None
-        
-        # Format: "44 - 9" or "44 - 9.5"
-        parts = text.split('-')
-        if len(parts) == 2:
-            try:
-                ft = float(parts[0].strip())
-                inch = float(parts[1].strip())
-                return round(ft + (inch / 12.0), 3)
-            except ValueError:
-                pass
-        
-        # Try pure float
-        try:
-            return float(text)
-        except ValueError:
-            pass
-            
-        return text
+        return parse_distance(text)
 
     def clean_text(self, text):
         if isinstance(text, str):

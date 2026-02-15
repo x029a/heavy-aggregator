@@ -297,8 +297,67 @@ def parse_athlete_name(name_raw):
     # Normalize unicode characters
     clean = name_raw.replace('\u00a0', ' ').strip()
     
-    parts = clean.split(' ', 1)
     if len(parts) == 1:
         return {'firstName': parts[0], 'lastName': ''}
     else:
         return {'firstName': parts[0], 'lastName': parts[1]}
+
+def parse_distance(text):
+    """
+    Unified distance parser for all scrapers.
+    Handles:
+    - 57' 4"
+    - 57'
+    - 57-4
+    - 44 - 9
+    - 574 (Heuristic for 57' 4")
+    """
+    import re
+    if not text: return None
+    text = str(text).strip()
+    if text.upper() in ['NT', 'DNS', '-', '', 'F', 'FOUL', 'ND']: return None
+    
+    if ':' in text: return text # Time format often used in Caber or Track
+    
+    # 1. Standard Feet/Inches: 57' 4", 57'4, 57'-4"
+    match = re.match(r"(\d+)'\s*-?\s*(\d*\.?\d*)\"?", text)
+    if match:
+        feet = float(match.group(1))
+        inches_str = match.group(2)
+        inches = float(inches_str) if inches_str else 0
+        return round(feet + (inches / 12.0), 3)
+
+    # 2. Scottish Style: "44 - 9" or "44-9" (No quotes)
+    if '-' in text and "'" not in text:
+        parts = text.split('-')
+        if len(parts) == 2:
+            try:
+                ft = float(parts[0].strip())
+                inch = float(parts[1].strip())
+                return round(ft + (inch / 12.0), 3)
+            except ValueError:
+                pass
+                
+    # 3. Feet Only: 57'
+    match_ft = re.match(r"(\d+)'$", text)
+    if match_ft: return float(match_ft.group(1))
+    
+    # 4. Floating Point / Raw Number Fallback
+    try:
+        val = float(text)
+        
+        # HEURISTIC: Check for missing separators in large numbers (3-digit only)
+        # e.g., 574 -> 57' 4"
+        if val > 100 and val < 1000 and '.' not in text:
+            s_val = str(int(val))
+            if len(s_val) == 3:
+                ft = float(s_val[:2])
+                inch = float(s_val[2:])
+                if inch < 12:
+                    return round(ft + (inch / 12.0), 3)
+                    
+        return val
+    except ValueError:
+        pass
+        
+    return text

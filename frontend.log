@@ -7,3 +7,12 @@
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
+11:34:15 AM [vite] (client) hmr update /src/components/Controls.jsx
+11:34:25 AM [vite] (client) hmr update /src/App.css
+11:34:25 AM [vite] (client) hmr update /src/App.css
+11:34:31 AM [vite] (client) hmr update /src/App.jsx
+11:34:41 AM [vite] (client) hmr update /src/components/DataViewer.jsx
+11:34:42 AM [vite] (client) ✨ new dependencies optimized: react-syntax-highlighter, react-syntax-highlighter/dist/esm/styles/prism
+11:34:42 AM [vite] (client) ✨ optimized dependencies changed. reloading
+11:35:51 AM [vite] (client) hmr update /src/App.jsx
+11:37:37 AM [vite] (client) hmr update /src/App.css

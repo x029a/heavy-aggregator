@@ -56,13 +56,15 @@ class ScraperManager:
         self.status = "IDLE"
         self.lock = threading.Lock()
 
-    def start_scraper(self, site: str):
+    def start_scraper(self, site: str, extra_args: List[str] = None):
         with self.lock:
             if self.process and self.process.poll() is None:
                 raise HTTPException(status_code=400, detail="Scraper is already running.")
             
             self.status = "RUNNING"
             cmd = [sys.executable, "main.py", "--site", site, "--output-format", "json"]
+            if extra_args:
+                cmd.extend(extra_args)
             
             # Using Popen with text=True and line buffering
             self.process = subprocess.Popen(
@@ -104,8 +106,15 @@ async def startup_event():
     log_manager.loop = asyncio.get_running_loop()
 
 # --- Models ---
+class ScraperSettings(BaseModel):
+    concurrency: int = 5
+    throttle: int = 0
+    retry_count: int = 3
+    proxy: str = ""
+
 class ScrapeRequest(BaseModel):
     site: str
+    settings: ScraperSettings = ScraperSettings()
 
 # --- Routes ---
 
@@ -119,13 +128,32 @@ async def start_scrape(request: ScrapeRequest):
     if request.site not in ValidSites:
          raise HTTPException(status_code=400, detail=f"Invalid site. Must be one of {ValidSites}")
          
-    scraper_manager.start_scraper(request.site)
+    # Construct CLI args from settings
+    args = []
+    if request.settings.concurrency: args.extend(["--concurrency", str(request.settings.concurrency)])
+    if request.settings.throttle: args.extend(["--throttle", str(request.settings.throttle)])
+    if request.settings.retry_count: args.extend(["--retry-count", str(request.settings.retry_count)])
+    if request.settings.proxy: args.extend(["--proxy", request.settings.proxy])
+         
+    scraper_manager.start_scraper(request.site, args)
     return {"status": "started", "site": request.site}
 
 @app.post("/api/stop")
 async def stop_scrape():
     scraper_manager.stop_scraper()
     return {"status": "stopped"}
+
+@app.post("/api/shutdown")
+async def shutdown_server():
+    scraper_manager.stop_scraper()
+    
+    def kill():
+        import time
+        time.sleep(1)
+        os.kill(os.getpid(), signal.SIGINT)
+        
+    threading.Thread(target=kill).start()
+    return {"status": "shutting_down"}
 
 @app.websocket("/api/logs")
 async def websocket_endpoint(websocket: WebSocket):
