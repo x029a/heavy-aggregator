@@ -251,7 +251,7 @@ async def async_fetch_url(session, url, method='GET', data=None, settings=None):
                     if response.status == 500:
                         try:
                             text = await response.text()
-                            if "Microsoft JET Database Engine error" in text or "Syntax error in date" in text:
+                            if "Microsoft JET Database Engine error" in text or "Syntax error in date" in text or "error '80020009'" in text:
                                 logger.error(f"Unrecoverable Database Error for {url}. Skipping retry.")
                                 return None # Do not raise, return None to signal missing data
                         except Exception:
@@ -296,6 +296,7 @@ def parse_athlete_name(name_raw):
     
     # Normalize unicode characters
     clean = name_raw.replace('\u00a0', ' ').strip()
+    parts = clean.split(None, 1)
     
     if len(parts) == 1:
         return {'firstName': parts[0], 'lastName': ''}

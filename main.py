@@ -137,16 +137,40 @@ def main():
         
         # Async Runner Wrapper
         async def run_scrapers_sequence():
+            stats = []
             for s in scrapers:
                 logger.info(f"--- Launching {s.__class__.__name__} ---")
-                await s.run()
+                res = await s.run()
+                if res:
+                    stats.append(res)
                 logger.info(f"--- {s.__class__.__name__} Finished ---")
+            return stats
 
         # Async Execution
-        asyncio.run(run_scrapers_sequence())
+        all_stats = asyncio.run(run_scrapers_sequence())
         
         end_time = time.time()
         logger.info(f"All Tasks Done in {end_time - start_time:.2f} seconds.")
+        
+        # Print Summary
+        print("\n" + "="*45)
+        print(f"{'Site':<20} | {'Games':<10} | {'Athletes':<10}")
+        print("-" * 45)
+        
+        gr_total_games = 0
+        gr_total_athletes = 0
+        
+        for s in all_stats:
+            site = s.get('site', 'Unknown')
+            g = s.get('games_count', 0)
+            a = s.get('athletes_count', 0)
+            print(f"{site:<20} | {g:<10} | {a:<10}")
+            gr_total_games += g
+            gr_total_athletes += a
+            
+        print("-" * 45)
+        print(f"{'TOTAL':<20} | {gr_total_games:<10} | {gr_total_athletes:<10}")
+        print("="*45 + "\n")
         
         # 5. Upload Results
         from uploaders import get_uploader

@@ -47,6 +47,8 @@ class ScottishScoresScraper(Scraper):
         concurrency = self.settings.get('concurrency', 5)
         semaphore = asyncio.Semaphore(concurrency)
 
+        total_games = 0
+
         try:
             # 1. Scrape Games (Iterate Years)
             start_year = 1990
@@ -87,6 +89,7 @@ class ScottishScoresScraper(Scraper):
     
                     games = self.parse_games_list(idx_resp)
                     logger.info(f"  Found {len(games)} games in {year}.")
+                    total_games += len(games)
                     
                     # Scrape detailed games in parallel
                     game_tasks = [self.scrape_game_detail(session, g, semaphore, failure_logger) for g in games]
@@ -107,23 +110,54 @@ class ScottishScoresScraper(Scraper):
                 self.checkpoint.save("scottishscores_year", year)
 
             logger.info("ScottishScores Scraping Complete.")
+            return {
+                'site': 'Scottish Scores',
+                'games_count': total_games,
+                'athletes_count': len(self.athlete_db)
+            }
 
         finally:
             await session.close()
 
+    async def scrape_game_detail(self, session, game, semaphore, failure_logger=None):
+        async with semaphore:
+            url = f"{self.BASE_URL}/{game['url']}"
+            if game['url'].startswith('http'):
+                url = game['url']
+            elif game['url'].startswith('/'):
+                 url = f"{self.BASE_URL}{game['url']}"
+            
+            logger.info(f"    Scraping Game: {game['name']} ({game['id']})")
+            resp_text = await async_fetch_url(session, url, settings=self.settings)
+            
+            if not resp_text:
+                if failure_logger:
+                    failure_logger.log_failure(url, game['id'], f"Failed to fetch game details for {game['name']}")
+                return None
+            
+            soup = BeautifulSoup(resp_text, 'html.parser')
+            # Extract year/date from page if possible, or fallback to passed year?
+            # actually run() passes year to _update_athlete_db, so we just need results here.
+            
+            results = self.parse_game_results_table(soup)
+            
+            return {
+                'id': game['id'],
+                'name': game['name'],
+                'date': game.get('date'),
+                'url': url,
+                'results': results
+            }
+
     def _update_athlete_db(self, game_result, year):
-        # game_result: {id, name, results: {Class: [entries]}}
-        # Check if name starts with date? "MM/DD/YYYY - Name" or similar logic from parse_games_list
-        # But here game_result['name'] is what we parsed.
+        # game_result: {id, name, date, results: {Class: [entries]}}
         
         game_name = game_result.get('name', 'Unknown Game')
-        # Try to extract date
-        date_str = f"01/01/{year}" # Default
-        
-        # Simple heuristic: see if name starts with digit
-        parts = game_name.split(' - ', 1)
-        if len(parts) > 1 and parts[0][0].isdigit():
-             date_str = parts[0]
+        # Use explicit date if available, else fallback
+        date_str = game_result.get('date')
+        if not date_str:
+             date_str = f"01/01/{year}" # Default fallback
+
         
         game_log_info = {
             'Date': date_str,
@@ -134,7 +168,15 @@ class ScottishScoresScraper(Scraper):
 
         for cls, athletes in game_result.get('results', {}).items():
             for ath in athletes:
-                name = ath.get('Athlete')
+                name_data = ath.get('Athlete')
+                if not name_data: continue
+                
+                # Handle name as dict or string
+                if isinstance(name_data, dict):
+                    name = f"{name_data.get('firstName', '')} {name_data.get('lastName', '')}".strip()
+                else:
+                    name = str(name_data).strip()
+
                 if not name: continue
                 
                 if name not in self.athlete_db:
@@ -186,23 +228,29 @@ class ScottishScoresScraper(Scraper):
                     if code:
                         # Fix for "View" as name
                         name = a.get_text(strip=True)
+                        date_str = None
+                        
                         if name == "View":
                             # Try to find name in the row
                             row = a.find_parent('tr')
                             if row:
                                 cols = row.find_all('td')
                                 if cols and len(cols) > 0:
-                                     # Assuming First Column is Date, Second is Name? Or First is Name.
-                                     # Inspection needed or heuristic. 
-                                     # Usually: Date | Game Name | View
-                                     # Let's try to get the text from the cell *before* the link's cell?
-                                     # Or just grab all text from row excluding "View"
-                                     row_text = [td.get_text(strip=True) for td in cols if "View" not in td.get_text()]
-                                     # Join meaningful parts
-                                     candidate = " - ".join([t for t in row_text if t])
-                                     if candidate: name = candidate
+                                     # First column is the Game Name
+                                     name = cols[0].get_text(strip=True)
+                                     # Third column (index 2) is the Date
+                                     if len(cols) > 2:
+                                         raw_date = cols[2].get_text(strip=True)
+                                         # Check for concatenated dates: 10 chars + 10 chars
+                                         # e.g. 02/21/202602/22/2026
+                                         # Regex for MM/DD/YYYYMM/DD/YYYY
+                                         match = re.search(r'(\d{2}/\d{2}/\d{4})(\d{2}/\d{2}/\d{4})', raw_date)
+                                         if match:
+                                             date_str = f"{match.group(1)} - {match.group(2)}"
+                                         else:
+                                             date_str = raw_date
                                      
-                        games.append({'id': code, 'name': name, 'url': href})
+                        games.append({'id': code, 'name': name, 'date': date_str, 'url': href})
                 except Exception:
                     pass
         return games
@@ -228,6 +276,10 @@ class ScottishScoresScraper(Scraper):
         # The site structure is inconsistent, so we stream through TRs
         all_rows = []
         for table in soup.find_all('table'):
+            # Skip tables that are layout tables containing other tables
+            if table.find('table'):
+                continue
+                
             for tr in table.find_all('tr'):
                 # Clean every cell immediately
                 cols = [self.clean_text(td.get_text()) for td in tr.find_all(['td', 'th'])]
@@ -270,6 +322,24 @@ class ScottishScoresScraper(Scraper):
                     # Events are after Points: [Braemar, Open, ...]
                     # Warning: Headers might be condensed or have weird names
                     event_headers = row[pts_idx+1:]
+                    
+                    # Sanitize Headers
+                    cleaned_headers = []
+                    for h in event_headers:
+                        # Fix Caber weirdness
+                        if "Caber0-0" in h or "0 lbs" in h:
+                            h = "Caber"
+                        # Fix Sheaf0
+                        elif h == "Sheaf0":
+                            h = "Sheaf"
+                        elif h.endswith("0") and len(h) > 1 and not h[-2].isdigit():
+                             # e.g. "Hammer0" -> "Hammer"? Be careful with "10"
+                             # But "Sheaf0" ends with 0. "Sheaf10" does too.
+                             # Sheaf0 check above handles it.
+                             pass
+                        
+                        cleaned_headers.append(h)
+                    event_headers = cleaned_headers
                 except ValueError:
                     pass
                 continue

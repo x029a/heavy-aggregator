@@ -5,3 +5,12 @@ __pycache__/
 output/
 temp_heavy.html
 settings.txt.bak
+checkpoint.json
+webapp/
+website/
+server.py
+deploy.sh
+server.log
+backend.log
+frontend.log    
+cron.log    

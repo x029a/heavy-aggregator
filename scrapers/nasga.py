@@ -19,10 +19,15 @@ class NasgaScraper(Scraper):
     def __init__(self, settings):
         super().__init__(settings)
         self.checkpoint = CheckpointManager()
+        logger.info("  [VERIFIED] NasgaScraper initialized with POST fixes and Dist filtering.")
 
     async def run(self):
         logger.info("Starting NASGA Scraper (Async)...")
+        # Setup Session with Specific Referer for Results
         session = await get_async_session(self.settings)
+        session.headers.update({
+            'Referer': 'http://www.nasgaweb.com/dbase/main.asp'
+        })
         
         # Setup Output Files
         base_output_dir = os.path.join('output', 'nasga')
@@ -39,6 +44,8 @@ class NasgaScraper(Scraper):
 
         # Athlete Aggregation DB
         self.athlete_db = {}
+        
+        total_games = 0
 
         try:
             # 1. Get Years
@@ -46,7 +53,7 @@ class NasgaScraper(Scraper):
             years = await self.get_years(session)
             if not years:
                 logger.error("No years found. Exiting.")
-                return
+                return {'site': 'Nasga', 'games_count': 0, 'athletes_count': 0}
 
             logger.info(f"Found {len(years)} years to process: {years}")
             
@@ -86,8 +93,9 @@ class NasgaScraper(Scraper):
                     for name, value in games.items():
                          if value and value not in ['0', 'none', ''] and not name.startswith('Select') and not name.startswith('---'):
                              valid_games[value] = name
-    
+                    
                     logger.info(f"  Found {len(valid_games)} games.")
+                    total_games += len(valid_games)
     
                     # Scrape Games for this Year (Parallel)
                     game_tasks = []
@@ -113,6 +121,11 @@ class NasgaScraper(Scraper):
                 self.checkpoint.save("nasga_last_completed_year", year)
 
             logger.info("NASGA Scraping Complete.")
+            return {
+                'site': 'Nasga',
+                'games_count': total_games,
+                'athletes_count': len(self.athlete_db)
+            }
 
         finally:
             await session.close()
@@ -166,10 +179,8 @@ class NasgaScraper(Scraper):
                     self.athlete_db[name]['history'].append(entry)
 
     def _save_athletes(self, base_dir):
-        # Overwrite the athletes file with current DB
         path = os.path.join(base_dir, 'nasga_athletes.json')
         try:
-            # Convert dict to list
             data = list(self.athlete_db.values())
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -178,130 +189,123 @@ class NasgaScraper(Scraper):
 
     async def get_years(self, session):
         resp_text = await async_fetch_url(session, self.BASE_URL, settings=self.settings)
-        if not resp_text:
-            return []
-        soup = BeautifulSoup(resp_text, 'html.parser')
-        years = self.get_dropdown_options(soup, 'resultsyear')
+        if not resp_text: return []
         
-        valid = []
-        for text, value in years.items():
-            year_candidate = text.strip()
-            if year_candidate.isdigit() and len(year_candidate) == 4:
-                valid.append(year_candidate)
-        return sorted(valid, reverse=True)
+        soup = BeautifulSoup(resp_text, 'html.parser')
+        years_dict = self.get_dropdown_options(soup, 'resultsyear')
+        
+        # Convert to sorted list of ints
+        years = []
+        for y_str in years_dict.values():
+            if 'resultsyear=' in y_str:
+                y_str = y_str.split('resultsyear=')[-1]
+            
+            if y_str.isdigit():
+                years.append(int(y_str))
+        
+        return sorted(years)
 
     def get_dropdown_options(self, soup, select_name):
         options = {}
         select = soup.find('select', {'name': select_name})
         if select:
             for opt in select.find_all('option'):
-                txt = opt.get_text(strip=True)
-                val = opt.get('value', '').strip()
-                if val:
-                    options[txt] = val
+                val = opt.get('value')
+                text = opt.get_text(strip=True)
+                options[text] = val
         return options
-
-    def clean_text(self, text):
-        if isinstance(text, str):
-            return text.replace('\u00a0', ' ').strip()
-        return text
-
-    def parse_number(self, text, dtype='float'):
-        if not text: return None
-        text = str(text).strip()
-        if text.upper().startswith('T') and text[1:].isdigit():
-            text = text[1:]
-        try:
-            if dtype == 'int': return int(float(text))
-            else: return float(text)
-        except ValueError:
-            return text
 
     def parse_distance(self, text):
         return parse_distance(text)
 
-    def parse_game_tables(self, tables):
-        structured_results = {}
-        current_class = "Unknown"
-        current_headers = []
-        all_rows = []
-        for table in tables:
-            for row in table:
-                cleaned_row = [self.clean_text(cell) for cell in row]
-                if not any(cleaned_row): continue
-                all_rows.append(cleaned_row)
-
-        for row in all_rows:
-            non_empty = [c for c in row if c]
-            if len(non_empty) <= 2 and len(non_empty) > 0:
-                val = non_empty[0]
-                if val not in ["Athlete", "Dist", "Pts"] and \
-                   not any(x in val for x in ["Notes:", "View the log", "Copyright", "Database Main", "Home|"]):
-                        if not val.replace('.','').isdigit():
-                            current_class = val
-                            if current_class not in structured_results:
-                                structured_results[current_class] = []
-                            continue
-
-            if "Athlete" in row:
-                current_headers = row
-                continue
-            if not non_empty or "Dist" in row or "Pts" in row: continue
-            if any(x in non_empty[0] for x in ["Notes:", "View the log", "Copyright", "Database Main", "Home|"]): continue
-
-            if current_headers:
-                if "Athlete" in row: continue
-                athlete_data = {}
-                if len(row) > 0: athlete_data['Athlete'] = row[0]
-                if len(row) > 1: athlete_data['Place'] = self.parse_number(row[1], dtype='int')
-                if len(row) > 2: athlete_data['GamesPoints'] = self.parse_number(row[2], dtype='float')
-                
-                # Identify event columns by index from the header row
-                event_col_indices = []
-                for idx, h in enumerate(current_headers):
-                    if idx >= 3 and h and h not in ['Pts', 'Points', 'GamesPoints']:
-                        event_col_indices.append((idx, h))
-                
-                for idx, evt in event_col_indices:
-                    if idx < len(row):
-                         raw_val = row[idx]
-                         val = self.parse_distance(raw_val)
-                         if val is not None:
-                             athlete_data[evt] = val
-                
-                if athlete_data.get('Athlete') and current_class != "Unknown":
-                     structured_results[current_class].append(athlete_data)
-        return structured_results
-
     async def scrape_game_async(self, session, game_id, game_name, year, semaphore, failure_logger=None):
         async with semaphore:
+            # ORIGINAL LOGIC: Use POST
+            # url = f"{self.RESULTS_URL}?gamesid={game_id}&resultsyear={year}" 
+            # POST doesn't use query params, but data payload.
+            
+            data = {
+                'gamesid': game_id,
+                'Submit': 'Select'
+            }
+            
             logger.info(f"    Scraping Game: {game_name} ({game_id})")
-            data = {'gamesid': game_id, 'Submit': 'Select'}
+            
+            # Use self.RESULTS_URL directly
             resp_text = await async_fetch_url(session, self.RESULTS_URL, method='POST', data=data, settings=self.settings)
+            
             if not resp_text:
                 if failure_logger:
-                    failure_logger.log_failure(self.RESULTS_URL, game_id, f"Failed to fetch game results for {game_name} ({year})")
+                    failure_logger.log_failure(self.RESULTS_URL, game_id, f"Failed to fetch game: {game_name} ({year})")
                 return None
             
             soup = BeautifulSoup(resp_text, 'html.parser')
-            tables_data = []
-            for table in soup.find_all('table'):
-                 t_rows = []
-                 for row in table.find_all('tr'):
-                     cols = [ele.get_text(strip=True) for ele in row.find_all(['td', 'th'])]
-                     t_rows.append(cols)
-                 if t_rows:
-                     tables_data.append(t_rows)
 
-            structured_data = self.parse_game_tables(tables_data)
+            # Find data table
+            table = None
+            for t in soup.find_all('table'):
+                if "Athlete" in t.get_text() and "Place" in t.get_text():
+                    table = t
+                    break
+            
+            if not table:
+                return None
+
+            results = {}
+            current_class = "Unknown"
+            headers = []
+            
+            rows = table.find_all('tr')
+            for row in rows:
+                cols = [td.get_text(strip=True) for td in row.find_all(['td', 'th'])]
+                if not cols: continue
+                
+                if 'Athlete' in cols:
+                    headers = cols
+                    continue
+                
+                # Exclude header-like rows or metadata
+                if 'Dist' in cols or 'Pts' in cols: continue
+                if any(x in cols[0] for x in ["Notes:", "View the log", "Copyright", "Database Main", "Home|"]): continue
+                    
+                if len(cols) == 1:
+                     current_class = cols[0]
+                     if current_class not in results:
+                         results[current_class] = []
+                     continue
+                
+                if headers and 'Athlete' in headers:
+                    entry = {}
+                    athlete_name = ""
+                    
+                    # Map columns to headers
+                    for i, col in enumerate(cols):
+                        if i >= len(headers): break
+                        header = headers[i]
+                        
+                        if header == 'Athlete':
+                            athlete_name = col
+                        elif header == 'Place':
+                            entry['Place'] = col
+                        elif header == 'Points':
+                            entry['GamesPoints'] = col
+                        else:
+                             # Event Result
+                             entry[header] = self.parse_distance(col)
+                    
+                    if athlete_name:
+                         # Use raw string for compatibility with _update_athlete_db
+                         # Clean unicode non-breaking spaces
+                         entry['Athlete'] = athlete_name.replace('\u00a0', ' ').strip()
+                         
+                         if current_class not in results:
+                             results[current_class] = []
+                         
+                         results[current_class].append(entry)
+
             return {
                 'id': game_id,
                 'name': game_name,
                 'year': year,
-                'results': structured_data
+                'results': results
             }
-
-
-
-
-

@@ -201,6 +201,8 @@ class HeavyAthleteScraper:
         
         session = await get_async_session(self.settings)
         
+        total_games = 0
+
         try:
             for year in years:
                 logger.info(f"Scanning Year: {year}")
@@ -222,7 +224,9 @@ class HeavyAthleteScraper:
                     year_games = [g for months in month_results for g in months]
                     
                     if year_games:
-                        logger.info(f"  Found {len(year_games)} games in {year}. Fetching details...")
+                        count = len(year_games)
+                        logger.info(f"  Found {count} games in {year}. Fetching details...")
+                        total_games += count
                         
                         # 2. Fetch game details in parallel
                         game_tasks = [self._scrape_game(session, g, semaphore, failure_logger) for g in year_games]
@@ -242,6 +246,13 @@ class HeavyAthleteScraper:
                 
                 # Update Checkpoint
                 self.checkpoint.save("heavyathlete_year", year + 1)
+        
+            logger.info("HeavyAthlete Scraping Complete.")
+            return {
+                'site': 'Heavy Athlete',
+                'games_count': total_games,
+                'athletes_count': len(self.athlete_db)
+            }
                 
         except Exception as e:
             logger.exception(f"Error during scraping: {e}")
@@ -266,9 +277,17 @@ class HeavyAthleteScraper:
 
         for cls, athletes in game_result.get('results', {}).items():
             for ath in athletes:
-                name = ath.get('Athlete')
-                if not name: continue
+                name_data = ath.get('Athlete')
+                if not name_data: continue
                 
+                # Handle name as dict or string
+                if isinstance(name_data, dict):
+                    name = f"{name_data.get('firstName', '')} {name_data.get('lastName', '')}".strip()
+                else:
+                    name = str(name_data).strip()
+                
+                if not name: continue
+
                 if name not in self.athlete_db:
                     self.athlete_db[name] = {
                         'name': name,

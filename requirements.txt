@@ -2,3 +2,7 @@ fastapi
 uvicorn
 python-multipart
 websockets
+beautifulsoup4
+aiohttp
+lxml
+requests

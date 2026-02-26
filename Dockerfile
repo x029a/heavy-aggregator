@@ -1,22 +1,33 @@
-# Use an official Python runtime as a parent image
-FROM python:3.9-slim
+# Stage 1: Build the website
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/website
+COPY website/package*.json ./
+RUN npm ci
+COPY website/ ./
+RUN npm run build
 
-# Set the working directory in the container
+# Stage 2: Python backend
+FROM python:3.9-slim
 WORKDIR /app
 
-# Copy the current directory contents into the container at /app
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
 COPY . /app
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy built website from Stage 1
+COPY --from=frontend-builder /app/website/dist /app/website/dist
 
 # Create output directory
 RUN mkdir -p output
 
-# Define environment variable
+# Expose port
+EXPOSE 8000
+
+# Environment
 ENV PYTHONUNBUFFERED=1
 
-# Run main.py when the container launches
-ENTRYPOINT ["python", "main.py"]
-# Default arguments (can be overridden)
-CMD ["--help"]
+# Run the API server (serves both API + static website)
+ENTRYPOINT ["python", "server.py"]
