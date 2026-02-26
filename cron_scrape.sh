@@ -44,5 +44,9 @@ echo "[Scrape] Starting all scrapers..."
 cd "$APP_DIR"
 $VENV main.py --site all --output-format json 2>&1
 
+# 4. Rebuild search index for the static website
+echo "[Index] Rebuilding search index..."
+$VENV build_search_index.py "$APP_DIR/data"
+
 echo "[Scrape] Complete!"
 echo "=== Done — $(date) ==="

@@ -14,3 +14,4 @@ server.log
 backend.log
 frontend.log    
 cron.log    
+build_search_index.py
